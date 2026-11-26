@@ -83,7 +83,11 @@ export const playerResultSchema = z.object({
   /** Richtig oder falsch bei Multiple Choice, sonst null. */
   correct: z.boolean().nullable(),
   points: z.number().int(),
-  total: z.number().int(),
+  /**
+   * Gesamtpunkte. Null nach der letzten Frage: Die Ergebnisse aller Spieler gehen an alle Geräte, mit den Gesamtpunkten
+   * könnte ein Client die Rangliste vor der Enthüllung selbst berechnen.
+   */
+  total: z.number().int().nullable(),
   /** Rang und Veränderung, null bei Umfragen und nach der letzten Frage (der Rang folgt erst im Siegerbildschirm). */
   rank: z.number().int().nullable(),
   delta: z.number().int().nullable(),

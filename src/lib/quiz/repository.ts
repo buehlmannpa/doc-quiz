@@ -72,7 +72,7 @@ async function countSessions(executor: Executor, quizId: string): Promise<number
 }
 
 /** Fragen mit ihren Antworten, in der Reihenfolge des Quiz. */
-async function loadQuestions(executor: Executor, quizId: string): Promise<QuestionWithOptions[]> {
+export async function loadQuestions(executor: Executor, quizId: string): Promise<QuestionWithOptions[]> {
   const rows = await executor
     .select()
     .from(questions)

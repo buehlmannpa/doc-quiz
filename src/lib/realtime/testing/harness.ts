@@ -5,8 +5,10 @@
 import type { IncomingMessage } from "node:http";
 import type { AddressInfo } from "node:net";
 import IORedis from "ioredis";
-import { WebSocketServer } from "ws";
+import { WebSocket, WebSocketServer } from "ws";
+import type { GameController } from "../controller";
 import { RealtimeHub, type HubLimits } from "../hub";
+import { serverMessageSchema, type ServerMessage } from "../protocol";
 import type { GameStore } from "../store";
 import { ioredisSubscriber } from "../subscriber";
 
@@ -39,6 +41,8 @@ export async function startTestInstance(options: {
   store: GameStore;
   redisUrl: string;
   limits?: Partial<HubLimits>;
+  /** Spiellogik, die Antworten und Befehle bearbeitet. */
+  controller?: GameController;
   /** Eigene Uhr des Hubs, um eine Abweichung der Serveruhr zu simulieren. */
   now?: () => number;
   /** Fester Port, um eine gestoppte Instanz am selben Ort neu zu starten. */
@@ -48,6 +52,7 @@ export async function startTestInstance(options: {
   const hub = new RealtimeHub({
     store: options.store,
     subscriber: ioredisSubscriber(redis),
+    controller: options.controller,
     limits: options.limits,
     now: options.now,
   });
@@ -70,4 +75,53 @@ export async function startTestInstance(options: {
       await hub.close();
     },
   };
+}
+
+/** Ein einfacher WebSocket Client für Tests, der alle Nachrichten des Servers prüft und sammelt. */
+export class TestSocket {
+  readonly ws: WebSocket;
+  readonly messages: ServerMessage[] = [];
+  closed: { code: number; reason: string } | null = null;
+
+  constructor(url: string) {
+    this.ws = new WebSocket(url);
+    this.ws.on("message", (data) => {
+      this.messages.push(serverMessageSchema.parse(JSON.parse(data.toString())));
+    });
+    this.ws.on("close", (code, reason) => {
+      this.closed = { code, reason: reason.toString() };
+    });
+    this.ws.on("error", () => {});
+  }
+
+  async open(): Promise<this> {
+    if (this.ws.readyState !== WebSocket.OPEN) {
+      await new Promise<void>((resolve, reject) => {
+        this.ws.once("open", () => resolve());
+        this.ws.once("error", reject);
+      });
+    }
+    return this;
+  }
+
+  send(message: unknown): void {
+    this.ws.send(JSON.stringify(message));
+  }
+
+  hello(role: "player" | "screen" | "admin", code: string, token?: string): void {
+    this.send({ type: "hello", protocol: 1, role, code, ...(token ? { token } : {}) });
+  }
+
+  of<T extends ServerMessage["type"]>(type: T): Extract<ServerMessage, { type: T }>[] {
+    return this.messages.filter((message): message is Extract<ServerMessage, { type: T }> => message.type === type);
+  }
+
+  /** Der zuletzt empfangene Zustand. */
+  lastState() {
+    return this.of("state").at(-1)?.state ?? null;
+  }
+
+  close(): void {
+    this.ws.close();
+  }
 }

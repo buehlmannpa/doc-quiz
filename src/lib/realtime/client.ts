@@ -15,6 +15,10 @@
  *    Neuaufbau laufen kurz zwei Verbindungen, die Doppelten fallen so weg.
  * 4. Uhrenabgleich: Mit wenigen Ping Pong Runden schätzt der Client den Unterschied zu seiner Uhr (kleinste
  *    Laufzeit gewinnt). serverNow() liefert die Serverzeit für den Countdown.
+ * 5. Spielablauf: answer() und command() senden Nachrichten und warten auf die Quittung des Servers. Mit
+ *    autoTick meldet der Client dem Server, dass die Zeit einer Frage abgelaufen ist (es gibt keine Server Timer).
+ *    Der Server prüft die Frist selbst. Mit rotateAfterResolveMs baut der Client nach jeder Auflösung die Verbindung
+ *    kontrolliert neu auf, damit sie die Grenze von 300 Sekunden nie während einer Frage erreicht.
  */
 import type { PublicGameState } from "./game-state";
 import {
@@ -22,6 +26,7 @@ import {
   FATAL_CLOSE_CODES,
   PROTOCOL_VERSION,
   serverMessageSchema,
+  type Command,
   type Role,
   type ServerMessage,
 } from "./protocol";
@@ -51,6 +56,8 @@ export type ClientEvent =
   | { type: "clock"; offsetMs: number; rttMs: number }
   | { type: "dead"; silentMs: number };
 
+export type AckResult = { ok: true } | { ok: false; error: string };
+
 export type ClientTiming = {
   /** Ab diesem Alter einer Verbindung wird sie kontrolliert neu aufgebaut. Der Server beendet sie bei 290 Sekunden. */
   maxAgeMs: number;
@@ -62,6 +69,10 @@ export type ClientTiming = {
   pingIntervalMs: number;
   /** Abstand der Herzschläge. Kommt dreimal so lange nichts vom Server, gilt die Verbindung als tot. */
   heartbeatMs: number;
+  /** Wie lange auf die Quittung einer Antwort oder eines Befehls gewartet wird. */
+  ackTimeoutMs: number;
+  /** Abstand der Zeithinweise, solange eine abgelaufene Frage nicht aufgelöst ist. */
+  tickRetryMs: number;
 };
 
 export const DEFAULT_CLIENT_TIMING: ClientTiming = {
@@ -72,6 +83,8 @@ export const DEFAULT_CLIENT_TIMING: ClientTiming = {
   pingCount: 5,
   pingIntervalMs: 150,
   heartbeatMs: 15_000,
+  ackTimeoutMs: 6_000,
+  tickRetryMs: 2_000,
 };
 
 export type ClientOptions = {
@@ -83,6 +96,19 @@ export type ClientOptions = {
   onState?: (state: PublicGameState) => void;
   onStatus?: (status: ClientStatus) => void;
   onEvent?: (event: ClientEvent) => void;
+  /** Fortschritt der Antworten (nur Beamer und Admin erhalten ihn). */
+  onProgress?: (progress: { q: number; n: number }) => void;
+  /** Eine Bubble hüpft (nur Beamer und Admin). */
+  onNudge?: (playerId: string) => void;
+  /** Die eigene Antwort auf die Frage q, nach einer Wiederverbindung. */
+  onMine?: (mine: { q: number; option?: number; value?: number }) => void;
+  /**
+   * Zeithinweise an den Server, sobald die Zeit einer Frage abgelaufen ist. extraDelayMs ist die Wartezeit nach dem
+   * Ablauf (Beamer und Admin 0, Smartphones etwas länger, sie sind nur die Absicherung).
+   */
+  autoTick?: { extraDelayMs: number } | false;
+  /** Nach der Auflösung einer Frage die Verbindung nach zufälliger Wartezeit bis zu diesem Wert neu aufbauen. */
+  rotateAfterResolveMs?: number;
   timing?: Partial<ClientTiming>;
   random?: () => number;
   now?: () => number;
@@ -146,7 +172,11 @@ export class RealtimeClient {
   private ageTimer: ReturnType<typeof setTimeout> | null = null;
   private rotateTimer: ReturnType<typeof setTimeout> | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private tickTimer: ReturnType<typeof setTimeout> | null = null;
   private nextSessionId = 1;
+  private nextMessageId = 1;
+  /** Auf Quittung wartende Antworten und Befehle nach Kennung. */
+  private readonly acks = new Map<string, { resolve: (result: AckResult) => void; timer: ReturnType<typeof setTimeout> }>();
   /** Kennungen der Sitzungen, auf denen schon ein Zustand angekommen ist (Anmeldung abgeschlossen). */
   private readonly seen = new Set<number>();
   /** Zeitpunkt der letzten Nachricht von der aktiven Verbindung, für die Lebendprüfung. */
@@ -180,6 +210,65 @@ export class RealtimeClient {
     return this.active?.instanceId ?? null;
   }
 
+  /**
+   * Sendet die Antwort auf eine Frage. Das Ergebnis ist die Quittung des Servers. Ohne Verbindung oder ohne
+   * Quittung innert der Frist ist es ein Fehler: Bei "timeout" ist offen, ob der Server die Antwort noch erhalten hat.
+   * Nach einer Wiederverbindung meldet der Server die eigene Antwort (onMine), so lässt sich das klären.
+   */
+  answer(q: number, answer: { option: number } | { value: number }): Promise<AckResult> {
+    return this.request({ type: "answer", q, ...answer });
+  }
+
+  /** Sendet einen Steuerbefehl des Admins. expectedVersion schützt vor doppelten Klicks. */
+  command(cmd: Command, expectedVersion?: number): Promise<AckResult> {
+    return this.request({ type: "cmd", cmd, ...(expectedVersion !== undefined ? { expectedVersion } : {}) });
+  }
+
+  /** Lässt die eigene Bubble im Warteraum hüpfen. Der Server begrenzt auf einmal pro 2 Sekunden. */
+  nudge(): void {
+    this.sendRaw({ type: "nudge" });
+  }
+
+  /** Meldet dem Server, dass die Zeit der Frage abgelaufen ist. Er prüft die Frist selbst. */
+  tick(): void {
+    this.sendRaw({ type: "tick" });
+  }
+
+  private sendRaw(message: object): boolean {
+    const active = this.active;
+    if (!active || active.socket.readyState !== OPEN || !this.seen.has(active.id)) return false;
+    active.socket.send(JSON.stringify(message));
+    return true;
+  }
+
+  private request(message: { type: "answer" | "cmd" } & Record<string, unknown>): Promise<AckResult> {
+    const id = `m${this.nextMessageId++}`;
+    return new Promise<AckResult>((resolve) => {
+      if (!this.sendRaw({ ...message, id })) {
+        resolve({ ok: false, error: "offline" });
+        return;
+      }
+      const timer = setTimeout(() => {
+        this.acks.delete(id);
+        resolve({ ok: false, error: "timeout" });
+      }, this.timing.ackTimeoutMs);
+      this.acks.set(id, { resolve, timer });
+    });
+  }
+
+  private settleAck(id: string, result: AckResult): void {
+    const entry = this.acks.get(id);
+    if (!entry) return;
+    clearTimeout(entry.timer);
+    this.acks.delete(id);
+    entry.resolve(result);
+  }
+
+  /** Bricht alle wartenden Quittungen ab, wenn die aktive Verbindung weg ist. Ob die Nachricht ankam, ist dann offen. */
+  private failAcks(error: string): void {
+    for (const id of [...this.acks.keys()]) this.settleAck(id, { ok: false, error });
+  }
+
   start(): void {
     if (this.status !== "idle" && this.status !== "closed") return;
     this.stopped = false;
@@ -195,6 +284,7 @@ export class RealtimeClient {
     }
     this.active = null;
     this.pending = null;
+    this.failAcks("offline");
     this.setStatus("closed");
   }
 
@@ -248,8 +338,8 @@ export class RealtimeClient {
   }
 
   private clearTimers(): void {
-    for (const timer of [this.retryTimer, this.ageTimer, this.rotateTimer]) if (timer) clearTimeout(timer);
-    this.retryTimer = this.ageTimer = this.rotateTimer = null;
+    for (const timer of [this.retryTimer, this.ageTimer, this.rotateTimer, this.tickTimer]) if (timer) clearTimeout(timer);
+    this.retryTimer = this.ageTimer = this.rotateTimer = this.tickTimer = null;
     this.stopHeartbeat();
   }
 
@@ -341,6 +431,24 @@ export class RealtimeClient {
         }
         break;
       }
+      case "ack":
+        if (message.id !== undefined) {
+          this.settleAck(message.id, message.ok ? { ok: true } : { ok: false, error: message.error ?? "unknown" });
+        }
+        break;
+      case "progress":
+        this.options.onProgress?.({ q: message.q, n: message.n });
+        break;
+      case "nudge":
+        this.options.onNudge?.(message.id);
+        break;
+      case "mine":
+        this.options.onMine?.({
+          q: message.q,
+          ...(message.option !== undefined ? { option: message.option } : {}),
+          ...(message.value !== undefined ? { value: message.value } : {}),
+        });
+        break;
       case "reconnect":
         // Der Server kündigt das Ende dieser Verbindung an. Jetzt ist der beste Moment für den Neuaufbau.
         if (session === this.active) this.rotate("server_notice");
@@ -358,9 +466,11 @@ export class RealtimeClient {
     if (isNewGame) this.lastVersion = -1;
 
     if (state.version > this.lastVersion) {
+      const previous = this.state;
       this.lastVersion = state.version;
       this.state = state;
       this.options.onState?.(state);
+      this.onStateAccepted(previous, state);
     }
 
     // Die erste Nachricht einer Verbindung schliesst deren Anmeldung ab.
@@ -378,6 +488,41 @@ export class RealtimeClient {
         connectMs: this.now() - session.openedAt,
       });
     }
+  }
+
+  /** Reaktionen auf einen neuen Zustand: Zeithinweis planen, nach der Auflösung die Verbindung erneuern. */
+  private onStateAccepted(previous: PublicGameState | null, state: PublicGameState): void {
+    this.armTick(state);
+    const resolvedNow =
+      previous !== null &&
+      previous.createdAt === state.createdAt &&
+      previous.phase === "question" &&
+      (state.phase === "resolved" || state.phase === "podium");
+    if (resolvedNow && this.options.rotateAfterResolveMs !== undefined) {
+      this.rotateSoon(this.options.rotateAfterResolveMs, "after_resolution");
+    }
+  }
+
+  /**
+   * Plant den Zeithinweis. Ablauf der Frist nach der geschätzten Serverzeit plus eine kleine Reserve, damit der Server
+   * den Hinweis nicht als zu früh ablehnt. Bleibt die Frage danach offen (zu früh gemeldet, Hinweis verloren), wird
+   * der Hinweis wiederholt. Das ersetzt die fehlenden Server Timer.
+   */
+  private armTick(state: PublicGameState): void {
+    if (this.tickTimer) clearTimeout(this.tickTimer);
+    this.tickTimer = null;
+    const config = this.options.autoTick;
+    if (!config || state.phase !== "question" || !state.question) return;
+    const questionIndex = state.question.index;
+    const createdAt = state.createdAt;
+    const fire = () => {
+      const current = this.state;
+      if (!current || current.createdAt !== createdAt || current.phase !== "question" || current.question?.index !== questionIndex) return;
+      this.tick();
+      this.tickTimer = setTimeout(fire, this.timing.tickRetryMs);
+    };
+    const wait = state.question.deadline - this.serverNow() + 150 + config.extraDelayMs;
+    this.tickTimer = setTimeout(fire, Math.max(50, wait));
   }
 
   /** Die neue Verbindung hat den Zustand geliefert: Sie wird aktiv, die alte wird geschlossen. */
@@ -483,6 +628,7 @@ export class RealtimeClient {
     if (session !== this.active) return; // Eine alte Verbindung, die wir selbst geschlossen haben.
 
     this.active = null;
+    this.failAcks("disconnected");
     if (this.ageTimer) clearTimeout(this.ageTimer);
     this.ageTimer = null;
     this.stopHeartbeat();

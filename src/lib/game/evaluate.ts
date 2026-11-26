@@ -191,7 +191,7 @@ export function evaluateQuestion(input: EvaluationInput): Evaluation {
     const hideRank = isPoll || isLast;
     results[row.player.id] = {
       ...row.result,
-      total: entry.total,
+      total: isLast ? null : entry.total,
       rank: hideRank ? null : entry.rank,
       delta: hideRank ? null : rankDelta(prior.get(row.player.id)?.rank, entry.rank),
     };

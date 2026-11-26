@@ -87,6 +87,8 @@ export type GameOutcome = {
   finalRows: FinalRow[];
   /** Pro Frage (Index) der Stand aller Spieler nach der Frage, nach Spieler Kennung. */
   records: Map<string, PlayerScore>[];
+  /** Hash des Spielertokens pro Spieler Kennung, so wie er in Redis liegt. Das Token selbst kennt der Server nie. */
+  tokenHashes: Record<string, string>;
 };
 
 export type EngineHooks = {
@@ -589,8 +591,14 @@ export class GameEngine implements GameController {
     if (!quiz) return null;
     const finalRows = await this.readFinalRows(code);
     if (!finalRows) return null;
-    const records = await Promise.all(quiz.questions.map((_, index) => this.readScores(code, index)));
-    return { code, createdAt: state.createdAt, quiz, players: state.players, finalRows, records };
+    const [records, tokens] = await Promise.all([
+      Promise.all(quiz.questions.map((_, index) => this.readScores(code, index))),
+      this.store.port.hgetall(this.store.subKey(code, "tok")),
+    ]);
+    // In Redis zeigt der Token Hash auf die Spieler Kennung. Für die Datenbank wird das umgedreht.
+    const tokenHashes: Record<string, string> = {};
+    for (const [hash, playerId] of Object.entries(tokens)) tokenHashes[playerId] = hash;
+    return { code, createdAt: state.createdAt, quiz, players: state.players, finalRows, records, tokenHashes };
   }
 
   /** Speichert die Resultate mit bis zu drei Versuchen. Ein Fehler stoppt das Spiel nicht, die Resultate bleiben in Redis. */
