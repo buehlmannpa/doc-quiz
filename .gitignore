@@ -1,0 +1,27 @@
+# Abhängigkeiten
+/node_modules
+
+# Next.js
+/.next/
+/out/
+next-env.d.ts
+
+# Tests
+/coverage
+
+# Umgebungsvariablen (niemals committen)
+.env
+.env.*
+!.env.example
+
+# Vercel
+.vercel
+
+# Ergebnisse von Messläufen
+spike-result.json
+loadtest-result.json
+
+# Sonstiges
+.DS_Store
+*.log
+*.tsbuildinfo
