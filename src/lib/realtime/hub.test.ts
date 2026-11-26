@@ -319,6 +319,30 @@ describe.skipIf(!redisUrl)("RealtimeHub (echte WebSockets, echtes Redis)", () =>
     expect((await client.waitForClose()).code).toBe(CLOSE_CODES.RATE_LIMITED);
   });
 
+  it("begrenzt die Zahl gleichzeitiger Verbindungen pro Instanz und gibt den Platz wieder frei", async () => {
+    const a = await startInstance({ maxConnections: 3 });
+    const code = await newGame();
+    const accepted: TestClient[] = [];
+    for (let i = 0; i < 3; i += 1) {
+      const client = await connect(a);
+      client.hello("screen", code);
+      accepted.push(client);
+    }
+    await until(() => accepted.every((client) => client.states().length === 1));
+
+    const refused = await connect(a);
+    expect((await refused.waitForClose()).code).toBe(1013);
+    expect(a.hub.stats().connections).toBe(3);
+
+    // Wird ein Platz frei, kommt die nächste Verbindung durch.
+    accepted[0]?.close();
+    await accepted[0]?.waitForClose();
+    await until(() => a.hub.stats().connections === 2);
+    const next = await connect(a);
+    next.hello("screen", code);
+    await until(() => next.states().length === 1);
+  });
+
   it("löst bei abgewiesenen Anmeldungen kein Abonnement aus", async () => {
     const a = await startInstance();
     const code = await newGame();
@@ -503,6 +527,32 @@ describe.skipIf(!redisUrl)("RealtimeHub (echte WebSockets, echtes Redis)", () =>
     // Das Spiel läuft danach normal weiter.
     await store.touch(code);
     await until(() => client.lastVersion() === 1);
+  });
+
+  it("verteilt ein neues Spiel unter demselben Code, obwohl seine Versionen kleiner sind als die des alten", async () => {
+    const a = await startInstance({ idleUnsubscribeMs: 5000 });
+    const code = await newGame();
+    const first = await connect(a);
+    first.hello("screen", code);
+    await until(() => first.states().length === 1);
+    for (let i = 0; i < 5; i += 1) await store.touch(code);
+    await until(() => first.lastVersion() === 5);
+    first.close();
+    await first.waitForClose();
+
+    // Die Gruppe lebt noch (Frist 5 Sekunden). Das Spiel wird gelöscht und mit demselben Code neu angelegt.
+    await store.deleteGame(code);
+    await sleep(5);
+    await store.createGame(code);
+    const second = await connect(a);
+    second.hello("screen", code);
+    await until(() => second.states().length >= 1);
+    expect(second.states()[0]?.version).toBe(0); // der frische Zustand, nicht der zwischengespeicherte alte
+
+    // Und die Änderungen des neuen Spiels kommen an, auch wenn ihre Versionen kleiner sind als 5.
+    await store.touch(code);
+    await store.touch(code);
+    await until(() => second.lastVersion() === 2, 3000, "Version 2 des neuen Spiels");
   });
 
   // ------------------------------------------------------------------------------------------------------

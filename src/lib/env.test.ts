@@ -1,13 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
   EnvError,
-  isSpikeEnabled,
   presentNames,
   resolveAdminEnv,
   resolveDbEnv,
   resolveDeploymentEnv,
   resolveKeyPrefix,
   resolveRedisRestEnv,
+  resolveRealtimeLimits,
   resolveRedisTcpEnv,
   resolveSessionSecret,
 } from "./env";
@@ -123,6 +123,26 @@ describe("resolveAdminEnv", () => {
   });
 });
 
+describe("resolveRealtimeLimits", () => {
+  it("nimmt Standardwerte, wenn nichts gesetzt ist", () => {
+    expect(resolveRealtimeLimits({})).toEqual({});
+    expect(resolveRealtimeLimits({ REALTIME_MAX_AGE_CLOSE_MS: "  " })).toEqual({});
+  });
+
+  it("liest beide Werte", () => {
+    expect(resolveRealtimeLimits({ REALTIME_MAX_AGE_NOTICE_MS: "1000000", REALTIME_MAX_AGE_CLOSE_MS: "2000000" })).toEqual({
+      maxAgeNoticeMs: 1_000_000,
+      maxAgeCloseMs: 2_000_000,
+    });
+  });
+
+  it("lehnt ungültige Werte ab", () => {
+    for (const bad of ["abc", "1.5", "999", "3600001", "-5"]) {
+      expect(() => resolveRealtimeLimits({ REALTIME_MAX_AGE_CLOSE_MS: bad }), bad).toThrow(EnvError);
+    }
+  });
+});
+
 describe("resolveSessionSecret", () => {
   it("verlangt nur das Geheimnis, nicht das Admin Passwort", () => {
     expect(resolveSessionSecret({ SESSION_SECRET: "x".repeat(32) })).toBe("x".repeat(32));
@@ -157,11 +177,5 @@ describe("Umgebung und Schlüsselpräfix", () => {
 describe("Hilfsfunktionen", () => {
   it("meldet gesetzte Namen ohne Werte", () => {
     expect(presentNames({ A: "x", B: "", C: "  ", D: "y" }, ["A", "B", "C", "D", "E"])).toEqual(["A", "D"]);
-  });
-
-  it("schaltet die Spike Endpunkte nur mit SPIKE_ENABLED=1 frei", () => {
-    expect(isSpikeEnabled({ SPIKE_ENABLED: "1" })).toBe(true);
-    expect(isSpikeEnabled({ SPIKE_ENABLED: "true" })).toBe(false);
-    expect(isSpikeEnabled({})).toBe(false);
   });
 });

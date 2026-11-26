@@ -161,6 +161,29 @@ export function resolveSessionSecret(source: EnvSource): string {
   return parsed.data;
 }
 
+/**
+ * Optionale Messhilfe: Überschreibt, wann der Hub die Verbindung ankündigt und beendet. Standard sind 270 und 290
+ * Sekunden, damit der Hub immer vor der Plattformgrenze von 300 Sekunden handelt. Wer die Grenze der Plattform
+ * selbst messen will, setzt beide Werte hoch (zum Beispiel 1000000). Nur für Messungen gedacht, nicht für den Betrieb.
+ */
+export function resolveRealtimeLimits(source: EnvSource): { maxAgeNoticeMs?: number; maxAgeCloseMs?: number } {
+  const read = (name: string): number | undefined => {
+    const raw = source[name]?.trim();
+    if (!raw) return undefined;
+    const value = Number(raw);
+    if (!Number.isInteger(value) || value < 1_000 || value > 3_600_000) {
+      throw new EnvError(`${name} muss eine ganze Zahl zwischen 1000 und 3600000 sein (Millisekunden).`);
+    }
+    return value;
+  };
+  const limits: { maxAgeNoticeMs?: number; maxAgeCloseMs?: number } = {};
+  const notice = read("REALTIME_MAX_AGE_NOTICE_MS");
+  const close = read("REALTIME_MAX_AGE_CLOSE_MS");
+  if (notice !== undefined) limits.maxAgeNoticeMs = notice;
+  if (close !== undefined) limits.maxAgeCloseMs = close;
+  return limits;
+}
+
 // ---------------------------------------------------------------------------
 // Umgebung, Schlüsselpräfix, Schalter
 // ---------------------------------------------------------------------------
@@ -196,11 +219,6 @@ export function resolveKeyPrefix(source: EnvSource): string {
     default:
       return "local";
   }
-}
-
-/** Die Test Endpunkte (Spike) sind nur aktiv, wenn SPIKE_ENABLED=1 gesetzt ist. */
-export function isSpikeEnabled(source: EnvSource): boolean {
-  return source.SPIKE_ENABLED === "1";
 }
 
 // ---------------------------------------------------------------------------

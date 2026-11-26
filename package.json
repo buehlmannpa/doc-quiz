@@ -16,7 +16,7 @@
     "test:watch": "vitest",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
-    "spike:ws": "node scripts/spike-ws.mjs"
+    "dev:ws": "tsx scripts/dev-ws-server.ts"
   },
   "dependencies": {
     "@upstash/redis": "^1.41.1",
@@ -42,6 +42,7 @@
     "eslint": "^9.0.0",
     "eslint-config-next": "16.4.6",
     "tailwindcss": "^4.3.5",
+    "tsx": "^4.23.15",
     "typescript": "~5.9.3",
     "vitest": "^5.1.2"
   }

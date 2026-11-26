@@ -71,7 +71,7 @@ Unter Settings, Environment Variables im Vercel Projekt:
 * `ADMIN_PASSWORD`: Passwort für das Adminportal, mindestens 8 Zeichen. Wird ab Meilenstein 2 gebraucht.
 * `SESSION_SECRET`: langer Zufallswert, mindestens 32 Zeichen. Erzeugen mit `openssl rand -base64 48`. Es gibt keinen Ersatzwert: Ohne dieses Geheimnis startet der Adminbereich nicht.
 * `HEALTH_TOKEN` (optional): damit der Systemcheck in der Produktion die Details zeigt.
-* `SPIKE_ENABLED` mit dem Wert `1`: nur für Messungen, nur im Bereich Preview setzen. Siehe `docs/SPIKE.md`. In der Produktion sind die Test Endpunkte unabhängig von dieser Variable gesperrt.
+* `REALTIME_MAX_AGE_NOTICE_MS` und `REALTIME_MAX_AGE_CLOSE_MS` (optional, nur für eine Messung): siehe `docs/VERBINDUNGSTEST.md`. Im Normalbetrieb nicht setzen.
 
 ## Schritt 6: Tabellen anlegen (Migration)
 
@@ -160,21 +160,22 @@ npm run dev
 
 Grenzen der lokalen Entwicklung:
 
-* Die WebSocket Funktion von Vercel gibt es nur in der Vercel Laufzeit. Lokal antwortet `/api/spike/ws` mit 501. Der WebSocket Pfad wird deshalb auf Preview Deployments getestet. Die Spiellogik ist vom Transport getrennt und lokal testbar.
-* Ein lokaler Redis Server (`redis://localhost:6379`) und ein lokales Postgres funktionieren für TCP und Datenbank. Die REST Schnittstelle von Upstash braucht dafür einen Ersatz oder eine echte Datenbank.
+* Die WebSocket Funktion von Vercel gibt es nur in der Vercel Laufzeit. Lokal antwortet `/api/ws` mit 501. Für die Entwicklung startet `npm run dev:ws` einen eigenen WebSocket Server mit demselben Hub (Port 3001). Setzen Sie dafür in `.env.local` die Variable `NEXT_PUBLIC_WS_URL=ws://localhost:3001/api/ws` und starten Sie beide Prozesse. Details in `docs/VERBINDUNGSTEST.md`.
+* Ein lokaler Redis Server (`redis://localhost:6379`) und ein lokales Postgres reichen für die Entwicklung. Ohne die REST Zugangsdaten von Upstash arbeitet der Spielspeicher automatisch über `REDIS_URL`.
 
 Nützliche Befehle:
 
 ```bash
 npm run lint        # Code Qualität
 npm run typecheck   # TypeScript Prüfung
-npm test            # Unit Tests
+npm test            # Unit Tests (Integrationstests brauchen TEST_DATABASE_URL und TEST_REDIS_URL)
+npm run dev:ws      # lokaler WebSocket Server für die Entwicklung
 npm run build       # Produktionsbuild
 ```
 
 ## Kontingente im Blick behalten
 
-* Upstash Free: 500'000 Befehle pro Monat. Der Systemcheck braucht pro Aufruf 2 Befehle (PING zählt laut Upstash nicht). Die Messungen aus `docs/SPIKE.md` sind auf wenige hundert Befehle begrenzt.
+* Upstash Free: 500'000 Befehle pro Monat. Der Systemcheck braucht pro Aufruf 2 Befehle (PING zählt laut Upstash nicht). Das Verbindungslabor (`docs/VERBINDUNGSTEST.md`) verbraucht pro Lauf mit 60 Teilnehmenden einige hundert bis wenige tausend Befehle.
 * Vercel Hobby: 4 Stunden Active CPU, 360 GB Stunden Provisioned Memory und 1 Million Aufrufe pro Monat. Wie viel eine ruhende WebSocket Verbindung davon verbraucht, ist nicht dokumentiert. Das wird in Meilenstein 8 gemessen.
 * Neon Free: 100 CU Stunden pro Monat und 5 GB Transfer.
 

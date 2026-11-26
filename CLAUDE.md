@@ -23,7 +23,7 @@ Rahmen: rund 60 gleichzeitige Teilnehmende, ein einziger Admin, Oberfläche auf 
 2. **Der Server ist die einzige Wahrheit.** Zeitmessung, Annahme von Antworten und Punkteberechnung geschehen serverseitig mit Serverzeitstempeln. Pro Frage gibt es Start und Ablaufzeit. Antworten nach Ablauf lehnt der Server ab. Pro Spieler und Frage wird nur eine Antwort angenommen (`HSETNX`).
 3. **Keine Server Timer.** Funktionen haben keine dauerhaften Hintergrundprozesse. Das Ende einer Frage löst aus: der Server selbst, sobald alle geantwortet haben, sonst der Browser des Admins bei Zeitablauf. Der Server prüft den Ablauf. Ist der Admin Browser nicht verbunden, wartet das Spiel. Manuell geht jederzeit.
 4. **Eine Verbindung pro Gerät, ein Subscriber pro Instanz.** Jede WebSocket Verbindung ist an eine Funktionsinstanz gebunden. Pro Instanz und Spiel gibt es genau einen Redis Subscriber, der Nachrichten im Speicher an die lokalen Sockets verteilt.
-5. **Subscribe über ioredis (TCP), nicht über das Upstash SDK.** Im Quellcode des SDK (Version 1.41.1) endet der SSE Stream bei einem Abbruch still, ohne Wiederverbindung und ohne Fehlerereignis, und Lesefehler gehen nur an `console.error`. Eine tote Subscription würde unbemerkt Nachrichten verlieren. ioredis ist der in der Upstash Dokumentation gezeigte Client für SUBSCRIBE und verbindet sich selbständig neu. Der Entscheid wird durch die Messungen in `docs/SPIKE.md` bestätigt oder angepasst.
+5. **Subscribe über ioredis (TCP), nicht über das Upstash SDK.** Im Quellcode des SDK (Version 1.41.1) endet der SSE Stream bei einem Abbruch still, ohne Wiederverbindung und ohne Fehlerereignis, und Lesefehler gehen nur an `console.error`. Eine tote Subscription würde unbemerkt Nachrichten verlieren. ioredis ist der in der Upstash Dokumentation gezeigte Client für SUBSCRIBE und verbindet sich selbständig neu. Der Entscheid ist in der Echtzeit Schicht umgesetzt und mit einem echten Redis getestet, einschliesslich eines erzwungenen Abbruchs der Subscriber Verbindung. Auf Vercel bestätigt ihn das Verbindungslabor (`docs/VERBINDUNGSTEST.md`).
 6. **Nachrichten tragen eine Zustandsversion.** Eine Lücke bei einer Nachricht (zum Beispiel während einer Wiederverbindung des Subscribers) führt zu einem Neuabgleich des vollständigen Zustands aus Redis. Ein verlorenes Publish bleibt so folgenlos.
 7. **Befehle tragen die erwartete Zustandsversion.** Ein doppelter Klick oder gleichzeitige Steuerung aus Portal und Beamer überspringt keine Phase.
 8. **Geheimhaltung.** Richtige Antworten gelangen erst bei der Auflösung an die Clients.
@@ -83,6 +83,23 @@ Abweichungen und Ergänzungen gegenüber dem Vorschlag der Spezifikation:
 8. **Tests:** Reine Logik hat Unit Tests. Das Repository hat 16 Integrationstests gegen eine echte Postgres Datenbank, die nur mit `TEST_DATABASE_URL` laufen (Befehl unter Befehle). Nie die Datenbank von Produktion oder Preview verwenden.
 9. **Migrationen aus dem Portal:** siehe Architekturentscheid 11.
 
+## Echtzeit Schicht (Meilenstein 3)
+
+1. **Dateien in `src/lib/realtime`:** `game-state.ts` (öffentlicher Zustand und Regeln), `protocol.ts` (Nachrichten mit Zod und Close Codes), `tokens.ts`, `redis-port.ts` (Adapter für Upstash REST und ioredis), `store.ts` (Spielspeicher), `subscriber.ts`, `hub.ts`, `origin.ts`, `client.ts`, `instance.ts` (Verdrahtung auf Vercel), `lab-metrics.ts`, `url.ts`.
+2. **Zustand:** Ein Hash `game:CODE` mit der Version `v` und dem vollständigen öffentlichen Zustand `s` als JSON. Ein Lesebefehl liefert alles. Ein Hash `game:CODE:tok` verbindet den Hash eines Tokens mit der Spieler Kennung. Ein Spiel verfällt 6 Stunden nach der letzten Änderung.
+3. **Änderungen:** Ein Lua Skript schreibt nur, wenn die Version noch die gelesene ist, und veröffentlicht im selben Schritt den vollständigen Zustand. Bei einem Konflikt liefert es den aktuellen Zustand zurück, der Aufrufer rechnet damit neu. Gleichzeitige Beitritte sind getestet (40 gleichzeitig, 100 nacheinander bis zur Obergrenze). Der Ersatzweg bei nicht erlaubtem PUBLISH in Lua ist ebenfalls getestet.
+4. **Öffentlicher Zustand:** Er enthält nie Geheimnisse. Richtige Antworten liegen in eigenen Schlüsseln und gelangen erst bei der Auflösung in den Zustand (ab Meilenstein 5). Für die Phasen gilt vorerst Warteraum, läuft, beendet, sie werden in Meilenstein 5 verfeinert.
+5. **Spielertoken:** zufällig mit 192 Bit, in Redis nur als HMAC Hash mit `SESSION_SECRET`. Wird das Geheimnis geändert, werden alle Token ungültig. Namen werden bereinigt (Unicode NFC, Leerraum, keine Steuerzeichen), sind 1 bis 20 Zeichen lang und pro Spiel ohne Beachtung der Gross und Kleinschreibung eindeutig. Höchstens 100 Teilnehmende.
+6. **Hub:** Pro Instanz ein Subscriber und pro Spiel eine Gruppe lokaler Verbindungen. Beim Verbinden wird der Zustand immer frisch aus Redis gelesen. Reihenfolge: lesen und Berechtigung prüfen, erst dann abonnieren, danach bei Bedarf erneut lesen, damit zwischen Lesen und Abonnieren nichts verloren geht. Unberechtigte Anfragen lösen kein Abonnement aus. Nach der letzten Verbindung bleibt der Kanal noch 15 Sekunden abonniert, damit der kontrollierte Neuaufbau ihn nicht verliert.
+7. **Versionen:** Jede Verbindung bekommt nur Versionen, die grösser sind als die zuletzt gesendete. Ein neues Spiel unter demselben Code (andere Erstellungszeit) setzt die Versionen zurück, im Hub und im Client.
+8. **Heilung:** Meldet der Subscriber eine Wiederverbindung, liest der Hub den Zustand aller aktiven Spiele neu. Die Tests erzwingen einen Abbruch der Subscriber Verbindung (`CLIENT KILL`) und prüfen, dass Änderungen danach wieder ankommen.
+9. **Grenzen pro Verbindung:** 5 Sekunden für hello, 15 Sekunden für die Anmeldung, Nachrichten höchstens 4 KB, 10 Nachrichten pro Sekunde (Stoss von 20), Sendepuffer höchstens 1 MB, höchstens 300 Verbindungen pro Instanz (danach Code 1013, der Client versucht es mit Backoff erneut), Ankündigung des Endes bei 270 Sekunden und eigenes Ende bei 290 Sekunden (Close Code 4012). Close Codes: 4001 ungültig, 4003 keine Berechtigung (endgültig), 4004 Spiel unbekannt (endgültig), 4008 Rate, 4009 hello Frist, 4011 zu langsam, 4012 Alter, 4013 Server.
+10. **Endpunkt `/api/ws`:** prüft den Origin (Schutz gegen Cross Site WebSocket Hijacking, Browser ohne passenden Origin werden mit 403 abgewiesen), bestimmt die Admin Berechtigung einmal beim Aufbau aus dem Cookie und übergibt dem Hub. Die Rolle Admin ist nur mit dieser Berechtigung möglich.
+11. **Client:** Neuaufbau (erst neue Verbindung, dann die alte schliessen), Backoff mit Zufall (500 Millisekunden bis 10 Sekunden), Altersgrenze 240 Sekunden, Herzschlag alle 15 Sekunden (nach 45 Sekunden Stille gilt die Verbindung als tot), `checkAlive` für das Aufwachen aus dem Standby, Uhrenabgleich mit der Messung der kleinsten Laufzeit, endgültige Fehler stoppen den Client. Die Anbindung an die Seite (Sichtbarkeit, Wake Lock, React Hook) folgt in Meilenstein 4 mit den Ansichten.
+12. **Lokale Entwicklung:** `npm run dev:ws` startet einen eigenen WebSocket Server mit demselben Hub, weil `next dev` keinen Upgrade kennt. Ohne REST Zugang von Upstash arbeitet der Spielspeicher über `REDIS_URL`.
+13. **Tests:** 118 Tests der Echtzeit Schicht gegen echtes Redis und echte WebSockets (zwei simulierte Instanzen), dazu Mutationsprüfungen der kritischen Logik (erneutes Lesen nach dem Abonnieren, Versionsprüfung, Neuabgleich, wiederverwendeter Code). Der Adapter für das Upstash SDK läuft über einen Ersatzserver (`testing/fake-upstash.ts`).
+14. **Verbindungslabor** (`/admin/lab`): misst im Browser mit bis zu 60 simulierten Teilnehmenden. Siehe `docs/VERBINDUNGSTEST.md`.
+
 ## Redis Schlüssel und Kanäle
 
 1. Alle Namen entstehen über `redisKey(...)` und `redisChannel(...)` in `src/lib/redis/keys.ts`. Niemals Schlüssel von Hand zusammensetzen.
@@ -101,7 +118,7 @@ Abweichungen und Ergänzungen gegenüber dem Vorschlag der Spezifikation:
 5a. Rate Limit des Logins: höchstens 8 Versuche pro IP und 40 insgesamt in 15 Minuten, gezählt in Redis (IP nur als Hash), mit Ersatz im Speicher der Instanz, falls Redis nicht erreichbar ist. Nach einem Fehlversuch antwortet der Server verzögert.
 5b. Zugriffsschutz in drei Schichten: `src/proxy.ts` leitet ohne gültige Session um, `requireAdmin()` steht am Anfang jeder Seite und jeder Server Action, und das Repository prüft die Regeln erneut. Layouts allein schützen nicht, weil sie bei der Navigation nicht neu geprüft werden. `requireAdmin()` liest das Cookie zuerst, damit Seiten immer dynamisch bleiben (sonst würde Next beim Bauen eine Umleitung vorrendern).
 6. Der Systemcheck `/api/health` gibt in der Produktion ohne Token nur `ok` zurück und berührt weder Neon noch Redis.
-7. Test Endpunkte (`/api/spike/...`) und die Seite `/design` sind in der Produktion gesperrt.
+7. Die Seite `/design` ist in der Produktion gesperrt. Das Verbindungslabor ist nur für den angemeldeten Admin erreichbar und schreibt ausschliesslich Testspiele im Bereich 900000 bis 999999.
 8. Zugangsdaten stehen nie in Fehlermeldungen oder Logs. Umgebungsvariablen nur über `src/lib/env.ts` lesen.
 
 ## Konventionen
@@ -119,7 +136,8 @@ Abweichungen und Ergänzungen gegenüber dem Vorschlag der Spezifikation:
 
 * `src/app/(player)`, `src/app/(admin)`, `src/app/(screen)`: die drei Ansichten.
 * `src/app/api/health`: Systemcheck.
-* `src/app/api/spike` und `src/lib/spike`: Messungen aus Meilenstein 1, werden entfernt.
+* `src/app/api/ws`: WebSocket Endpunkt. `src/lib/realtime`: Spielspeicher, Hub, Client und Protokoll (siehe unten). `src/app/(admin)/admin/(portal)/lab`: Verbindungslabor.
+* `scripts/dev-ws-server.ts`: lokaler WebSocket Server für die Entwicklung.
 * `src/app/design`: Gestaltungsvorschau (nicht in der Produktion).
 * `src/lib/env.ts`: Umgebungsvariablen. `src/lib/db`: Schema und Client. `src/lib/redis`: Schlüssel, REST Client, TCP Client.
 * `src/lib/design.ts`: Antwortfarben und Symbole. `src/components`: gemeinsame Bausteine.
@@ -133,19 +151,19 @@ Abweichungen und Ergänzungen gegenüber dem Vorschlag der Spezifikation:
 npm run dev          # lokale Entwicklung
 npm run lint         # ESLint
 npm run typecheck    # TypeScript
-npm test             # Unit Tests (Integrationstests werden übersprungen)
-TEST_DATABASE_URL=postgres://BENUTZER:PASSWORT@localhost:5432/quiztest npm test   # mit Integrationstests
+npm test             # Unit Tests (Integrationstests werden ohne TEST_DATABASE_URL und TEST_REDIS_URL übersprungen)
+TEST_DATABASE_URL=postgres://BENUTZER:PASSWORT@localhost:5432/quiztest TEST_REDIS_URL=redis://localhost:6379 npm test   # mit Integrationstests
 npm run build        # Produktionsbuild
 npm run db:generate  # neue Migration aus Schemaänderung
 npm run db:migrate   # Migration anwenden (DATABASE_URL_UNPOOLED)
-npm run spike:ws     # Messungen, siehe docs/SPIKE.md
+npm run dev:ws       # lokaler WebSocket Server für die Entwicklung (Port 3001)
 ```
 
 ## Meilensteine
 
-1. Projektgerüst, Region, Verbindungen, Schema, Dokumentation, Spike: **umgesetzt**. Die Messungen des Spikes auf Vercel stehen noch aus (`docs/SPIKE.md`) und sind Voraussetzung für Meilenstein 3.
-2. Adminlogin und CMS: **umgesetzt, wartet auf Bestätigung**. Noch nicht auf Vercel getestet.
-3. WebSocket Endpunkt, Publish/Subscribe, Spielertoken, Statusabgleich, Verbindungsstrategie.
+1. Projektgerüst, Region, Verbindungen, Schema, Dokumentation: **umgesetzt und abgenommen**.
+2. Adminlogin und CMS: **umgesetzt und abgenommen**, auf Vercel in Betrieb.
+3. WebSocket Endpunkt, Publish/Subscribe, Spielertoken, Statusabgleich, Verbindungsstrategie: **umgesetzt, wartet auf Bestätigung**. Lokal mit echtem Redis und echten WebSockets getestet. Auf Vercel noch nicht gemessen, dafür gibt es das Verbindungslabor.
 4. Warteraum mit Bubbles, QR Code, Beitritt, Beamer Ansicht.
 5. Spielablauf mit oberem Drittel der Auflösung.
 6. Punkteberechnung, Rangliste, Podest, Siegerbildschirm.
@@ -159,10 +177,12 @@ Diese Punkte sind in den offiziellen Quellen nicht festgehalten oder noch nicht 
 1. Ob `fra1` im Hobby Plan wählbar ist, und ob Neon und Upstash im kostenlosen Plan Frankfurt anbieten.
 2. Die Namen der Variablen der Upstash Marketplace Integration. Die App akzeptiert `UPSTASH_REDIS_REST_*`, `KV_REST_API_*`, `REDIS_URL` und `KV_URL`.
 3. Wie Upstash Publish und Subscribe Nachrichten zählt.
-4. Ob eine ruhende WebSocket Verbindung Active CPU oder Provisioned Memory verbraucht, und welchen Close Code die Plattform beim Erreichen von 300 Sekunden sendet.
+4. Ob eine ruhende WebSocket Verbindung Active CPU oder Provisioned Memory verbraucht, und welchen Close Code die Plattform beim Erreichen von 300 Sekunden sendet. Beides misst das Verbindungslabor (`docs/VERBINDUNGSTEST.md`).
 5. Ob `upgradeWebSocket` lokal mit `vercel dev` läuft. Mit `next dev` oder `next start` gibt es keinen WebSocket Upgrade.
 6. Ob die 0.5 Sekunden Regel auch für Schätzfragen gilt. Die Spezifikation nennt sie nur bei Multiple Choice. Offen für Meilenstein 6, Vorschlag: gleicher Zeitfaktor wie bei Multiple Choice.
 7. Die Nutzungsbedingungen des Hobby Plans für einen Club.
+8. Ob Upstash den Befehl PUBLISH innerhalb von Lua erlaubt. Der Spielspeicher wechselt bei einem Fehler automatisch auf getrenntes Veröffentlichen. Das Labor zeigt, welcher Weg aktiv ist.
+9. Wie viele Funktionsinstanzen bei 60 Verbindungen entstehen und wie schnell Änderungen auf Vercel ankommen.
 
 ## Quellen der Recherche (Stand 26. November 2026)
 

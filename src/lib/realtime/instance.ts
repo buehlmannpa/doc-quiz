@@ -5,20 +5,34 @@
  * Subscriber (ioredis über TCP). Beides wird beim ersten Gebrauch angelegt und bleibt für die Lebensdauer der
  * Instanz bestehen. globalThis überlebt auch das Neuladen im Entwicklungsmodus.
  */
-import { getKeyPrefix, resolveSessionSecret } from "@/lib/env";
+import { EnvError, getKeyPrefix, resolveRealtimeLimits, resolveRedisRestEnv, resolveSessionSecret } from "@/lib/env";
 import { getRedis } from "@/lib/redis/rest";
 import { createTcpRedis } from "@/lib/redis/tcp";
 import { RealtimeHub } from "./hub";
-import { upstashPort } from "./redis-port";
+import { ioredisPort, upstashPort, type RedisPort } from "./redis-port";
 import { GameStore } from "./store";
 import { ioredisSubscriber } from "./subscriber";
 
 type Instances = { __quizGameStore?: GameStore; __quizHub?: RealtimeHub };
 const g = globalThis as unknown as Instances;
 
+/**
+ * Auf Vercel läuft der Spielspeicher über die REST Schnittstelle von Upstash. Fehlt sie (lokale Entwicklung mit
+ * einem eigenen Redis Server), arbeitet er über TCP mit REDIS_URL. Beide Wege führen dieselbe Logik aus.
+ */
+function createRedisPort(): RedisPort {
+  try {
+    resolveRedisRestEnv(process.env);
+    return upstashPort(getRedis());
+  } catch (error) {
+    if (!(error instanceof EnvError)) throw error;
+    return ioredisPort(createTcpRedis("store"));
+  }
+}
+
 export function getGameStore(): GameStore {
   if (!g.__quizGameStore) {
-    g.__quizGameStore = new GameStore(upstashPort(getRedis()), {
+    g.__quizGameStore = new GameStore(createRedisPort(), {
       prefix: getKeyPrefix(),
       tokenSecret: resolveSessionSecret(process.env),
     });
@@ -31,6 +45,7 @@ export function getHub(): RealtimeHub {
     g.__quizHub = new RealtimeHub({
       store: getGameStore(),
       subscriber: ioredisSubscriber(createTcpRedis("hub")),
+      limits: resolveRealtimeLimits(process.env),
       // Strukturierte Zeilen, in den Vercel Logs gut zu filtern (zum Beispiel nach ws_close).
       log: (event, data) => console.log(JSON.stringify({ evt: event, ...data })),
     });

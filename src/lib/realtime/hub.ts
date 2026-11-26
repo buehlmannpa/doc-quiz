@@ -57,6 +57,11 @@ export type HubLimits = {
   maxBufferedBytes: number;
   /** So lange bleibt ein Kanal nach der letzten Verbindung noch abonniert. */
   idleUnsubscribeMs: number;
+  /**
+   * Höchstzahl gleichzeitiger Verbindungen pro Instanz, angemeldet oder nicht. Schützt den Speicher vor vielen
+   * unangemeldeten Verbindungen. Ein Quiz braucht rund 60 Verbindungen, die Grenze lässt viel Spielraum.
+   */
+  maxConnections: number;
 };
 
 export const DEFAULT_HUB_LIMITS: HubLimits = {
@@ -68,6 +73,7 @@ export const DEFAULT_HUB_LIMITS: HubLimits = {
   burst: 20,
   maxBufferedBytes: 1_000_000,
   idleUnsubscribeMs: 15_000,
+  maxConnections: 300,
 };
 
 export type HubOptions = {
@@ -89,6 +95,8 @@ type Group = {
   readyAt: number | null;
   latestVersion: number;
   latestPayload: string | null;
+  /** Erstellungszeit des Spiels, dessen Zustand zuletzt gesehen wurde. Unterscheidet zwei Spiele mit demselben Code. */
+  createdAt: number | null;
   idleTimer: ReturnType<typeof setTimeout> | null;
 };
 
@@ -141,6 +149,12 @@ export class RealtimeHub {
 
   /** Übernimmt einen frisch aufgebauten Socket. Wird vom Endpunkt nach dem WebSocket Upgrade aufgerufen. */
   attach(ws: WebSocket, ctx: ConnectionContext): void {
+    if (this.connections.size >= this.limits.maxConnections) {
+      // 1013 bedeutet "später noch einmal versuchen". Der Client verbindet sich mit Backoff neu, vielleicht auf einer anderen Instanz.
+      this.log("ws_refused", { instanceId: this.instanceId, connections: this.connections.size });
+      ws.close(1013, "busy");
+      return;
+    }
     const now = this.now();
     const conn: Connection = {
       id: this.nextId++,
@@ -320,6 +334,8 @@ export class RealtimeHub {
       if (conn.closed) return;
     }
 
+    this.adoptGame(group, state);
+
     this.send(conn, {
       type: "welcome",
       protocol: PROTOCOL_VERSION,
@@ -357,6 +373,7 @@ export class RealtimeHub {
       readyAt: null,
       latestVersion: -1,
       latestPayload: null,
+      createdAt: null,
       idleTimer: null,
     };
     group.ready = this.subscriber
@@ -387,8 +404,24 @@ export class RealtimeHub {
     this.deliver(group, parsed.data.v, parsed.data.state);
   }
 
+  /**
+   * Erkennt ein neues Spiel unter demselben Code. Ein Code wird nach dem Ende eines Spiels wiederverwendet, und die
+   * Gruppe lebt nach der letzten Verbindung noch eine Weile weiter. Beginnt dann ein neues Spiel bei Version 0,
+   * dürfen die gemerkten Versionen des alten Spiels nicht mehr gelten, sonst würde das neue Spiel unterdrückt.
+   */
+  private adoptGame(group: Group, state: PublicGameState): void {
+    if (group.createdAt !== null && group.createdAt !== state.createdAt) {
+      group.latestVersion = -1;
+      group.latestPayload = null;
+      for (const conn of group.conns) conn.lastSentVersion = -1;
+      this.log("game_replaced", { code: group.code });
+    }
+    group.createdAt = state.createdAt;
+  }
+
   /** Sendet einen Zustand an alle lokalen Verbindungen des Spiels, sofern er neuer ist als der bekannte. */
   private deliver(group: Group, version: number, state: PublicGameState): void {
+    this.adoptGame(group, state);
     if (version <= group.latestVersion) return;
     group.latestVersion = version;
     // Der Text ist für alle gleich und wird nur einmal gebaut.

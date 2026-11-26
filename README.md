@@ -16,7 +16,7 @@ npm run dev
 
 * `CLAUDE.md`: Architekturentscheide und Konventionen.
 * `docs/SETUP.md`: Einrichtung von GitHub, Vercel, Neon und Upstash.
-* `docs/SPIKE.md`: Messungen für WebSocket und Redis Subscribe.
+* `docs/VERBINDUNGSTEST.md`: Verbindungslabor für Messungen mit vielen Verbindungen und lokale Entwicklung der Echtzeit Schicht.
 
 ## Befehle
 

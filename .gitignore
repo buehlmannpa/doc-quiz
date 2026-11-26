@@ -18,7 +18,6 @@ next-env.d.ts
 .vercel
 
 # Ergebnisse von Messläufen
-spike-result.json
 loadtest-result.json
 
 # Sonstiges
