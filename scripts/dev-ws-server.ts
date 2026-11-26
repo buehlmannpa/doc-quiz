@@ -16,7 +16,9 @@ import { WebSocketServer } from "ws";
 import { SESSION_COOKIE } from "@/lib/auth/constants";
 import { verifySessionToken } from "@/lib/auth/token";
 import { getKeyPrefix, resolveRealtimeLimits, resolveRedisTcpEnv, resolveSessionSecret } from "@/lib/env";
+import { GameEngine } from "@/lib/game/engine";
 import { RealtimeHub } from "@/lib/realtime/hub";
+import { createSessionHooks } from "@/lib/realtime/instance";
 import { ioredisPort } from "@/lib/realtime/redis-port";
 import { GameStore } from "@/lib/realtime/store";
 import { ioredisSubscriber } from "@/lib/realtime/subscriber";
@@ -28,8 +30,14 @@ const redisUrl = resolveRedisTcpEnv(process.env).url;
 const secret = resolveSessionSecret(process.env);
 
 const store = new GameStore(ioredisPort(new IORedis(redisUrl)), { prefix: getKeyPrefix(), tokenSecret: secret });
+// Neon wird nur bei Gebrauch angesprochen. Ohne DATABASE_URL läuft das Spiel trotzdem, nur ohne Speichern der Resultate.
+const engine = new GameEngine(store, {
+  hooks: createSessionHooks(),
+  log: (event, data) => console.log(`[engine] ${event} ${JSON.stringify(data)}`),
+});
 const hub = new RealtimeHub({
   store,
+  controller: engine,
   subscriber: ioredisSubscriber(new IORedis(redisUrl)),
   limits: resolveRealtimeLimits(process.env),
   log: (event, data) => {

@@ -8,7 +8,7 @@ const PATHS: Record<AnswerShape, string> = {
 };
 
 /** Symbol eines Antwortslots. Übernimmt die Textfarbe der Umgebung. */
-export default function AnswerSymbol({ shape, size = 28 }: { shape: AnswerShape; size?: number }) {
+export default function AnswerSymbol({ shape, size = 28 }: { shape: AnswerShape; size?: number | string }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false">
       <path d={PATHS[shape]} />

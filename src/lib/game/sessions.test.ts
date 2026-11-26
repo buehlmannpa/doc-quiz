@@ -16,6 +16,7 @@ import { GameStore } from "@/lib/realtime/store";
 import { createQuizRepository } from "@/lib/quiz/repository";
 import type { QuestionInput } from "@/lib/quiz/schema";
 import { GameEngine } from "./engine";
+import { cancelGame, createGame } from "./lifecycle";
 import { createSessionRepository, SessionError } from "./sessions";
 
 const dbUrl = process.env.TEST_DATABASE_URL;
@@ -253,6 +254,37 @@ describe.skipIf(!dbUrl)("Durchführungen (echte Datenbank)", () => {
       expect(again).toBe(true);
       expect(await db.select().from(responses).where(eq(responses.sessionId, session?.id as string))).toHaveLength(8);
       expect(await db.select().from(players).where(eq(players.sessionId, session?.id as string))).toHaveLength(3);
+    });
+
+    it("wählt einen neuen Spielcode, wenn der Code in Redis noch belegt ist", async () => {
+      const quizId = await readyQuiz("Codewahl");
+      const taken = nextCode();
+      await store.createGame(taken);
+      const fresh = nextCode();
+      const codes = [taken, fresh];
+      const result = await createGame({ sessions: repo, store, generateCode: () => codes.shift() ?? fresh }, quizId);
+      expect(result).toMatchObject({ ok: true, code: fresh });
+      expect((await store.getState(fresh))?.quiz).toMatchObject({ title: "Codewahl", questionCount: 3 });
+      // Der erste Versuch hinterlässt keine aktive Durchführung mit dem belegten Code.
+      expect((await repo.getByCode(taken))?.status).not.toBe("lobby");
+    });
+
+    it("lehnt das Anlegen ab, solange eine Durchführung aktiv ist", async () => {
+      const [first, second] = [await readyQuiz("Erstes"), await readyQuiz("Zweites")];
+      const one = await createGame({ sessions: repo, store, generateCode: nextCode }, first);
+      expect(one.ok).toBe(true);
+      const two = await createGame({ sessions: repo, store, generateCode: nextCode }, second);
+      expect(two).toMatchObject({ ok: false });
+      expect(!two.ok && two.message).toContain("läuft bereits eine Durchführung");
+    });
+
+    it("bricht ab, auch wenn das Spiel in Redis nicht mehr existiert", async () => {
+      const quizId = await readyQuiz("Verwaist");
+      const code = nextCode();
+      await repo.createSession(quizId, code);
+      const engine = new GameEngine(store, { hooks: { onAborted: async ({ code: aborted }) => void (await repo.markCancelled(aborted)) } });
+      expect(await cancelGame({ engine, sessions: repo }, code)).toEqual({ ok: true });
+      expect((await repo.getByCode(code))?.status).toBe("cancelled");
     });
 
     it("bricht ab, ohne Resultate zu schreiben", async () => {

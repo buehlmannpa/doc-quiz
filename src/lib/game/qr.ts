@@ -1,0 +1,13 @@
+/**
+ * QR Code als SVG, auf dem Server erzeugt. Er enthält nur die Beitrittsadresse mit dem Spielcode.
+ */
+import QRCode from "qrcode";
+
+export async function qrSvg(text: string): Promise<string> {
+  return QRCode.toString(text, {
+    type: "svg",
+    errorCorrectionLevel: "M",
+    margin: 1,
+    color: { dark: "#1d1d1f", light: "#ffffff" },
+  });
+}

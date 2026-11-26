@@ -211,3 +211,29 @@ body {
     scroll-behavior: auto !important;
   }
 }
+
+/* Spielansichten. */
+@keyframes hop {
+  0% { transform: translateY(0) scale(1); }
+  30% { transform: translateY(-28px) scale(1.08, 0.94); }
+  55% { transform: translateY(0) scale(0.96, 1.05); }
+  75% { transform: translateY(-8px) scale(1); }
+  100% { transform: translateY(0) scale(1); }
+}
+.hop {
+  animation: hop 0.6s ease-out;
+}
+@keyframes pop-in {
+  from { opacity: 0; transform: scale(0.92); }
+  to { opacity: 1; transform: scale(1); }
+}
+.pop-in {
+  animation: pop-in 0.35s ease-out both;
+}
+@keyframes rise {
+  from { opacity: 0; transform: translateY(5vmin); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.rise {
+  animation: rise 0.7s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}

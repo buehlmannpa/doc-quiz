@@ -11,8 +11,8 @@ type NavItem = { href: string; label: string; availableFrom?: string };
 const NAV_ITEMS: readonly NavItem[] = [
   { href: "/admin", label: "Übersicht" },
   { href: "/admin/quizzes", label: "Quizzes" },
-  { href: "/admin/games", label: "Durchführung", availableFrom: "Meilenstein 4" },
-  { href: "/admin/results", label: "Resultate", availableFrom: "Meilenstein 7" },
+  { href: "/admin/games", label: "Durchführung" },
+  { href: "/admin/results", label: "Resultate" },
   { href: "/admin/system", label: "System" },
   { href: "/admin/lab", label: "Verbindungslabor" },
 ];

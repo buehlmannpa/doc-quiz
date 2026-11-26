@@ -16,7 +16,8 @@
     "test:watch": "vitest",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
-    "dev:ws": "tsx scripts/dev-ws-server.ts"
+    "dev:ws": "tsx scripts/dev-ws-server.ts",
+    "seed:demo": "tsx scripts/seed-demo.ts"
   },
   "dependencies": {
     "@upstash/redis": "^1.41.1",
