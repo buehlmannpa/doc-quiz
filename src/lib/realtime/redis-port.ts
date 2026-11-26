@@ -17,6 +17,15 @@ export interface RedisPort {
   expire(key: string, seconds: number): Promise<void>;
   publish(channel: string, message: string): Promise<number>;
   del(...keys: string[]): Promise<void>;
+  get(key: string): Promise<string | null>;
+  /** Setzt einen Wert mit Ablauf. */
+  set(key: string, value: string, ttlSeconds: number): Promise<void>;
+  /** Setzt einen Wert nur, wenn es den Schlüssel noch nicht gibt. Gibt zurück, ob er gesetzt wurde. */
+  setIfAbsent(key: string, value: string, ttlSeconds: number): Promise<boolean>;
+  /** Alle Felder eines Hashes, leer wenn es ihn nicht gibt. */
+  hgetall(key: string): Promise<Record<string, string>>;
+  /** Setzt viele Felder eines Hashes und verlängert dessen Ablauf. */
+  hsetMany(key: string, entries: Record<string, string>, ttlSeconds: number): Promise<void>;
 }
 
 /** Adapter für das Upstash SDK. Der Client muss mit automaticDeserialization: false laufen (siehe rest.ts). */
@@ -47,6 +56,24 @@ export function upstashPort(redis: Redis): RedisPort {
     async del(...keys) {
       if (keys.length > 0) await redis.del(...keys);
     },
+    async get(key) {
+      return (await redis.get<string>(key)) ?? null;
+    },
+    async set(key, value, ttlSeconds) {
+      await redis.set(key, value, { ex: ttlSeconds });
+    },
+    async setIfAbsent(key, value, ttlSeconds) {
+      return (await redis.set(key, value, { ex: ttlSeconds, nx: true })) === "OK";
+    },
+    async hgetall(key) {
+      const all = await redis.hgetall<Record<string, string>>(key);
+      return all ?? {};
+    },
+    async hsetMany(key, entries, ttlSeconds) {
+      if (Object.keys(entries).length === 0) return;
+      await redis.hset(key, entries);
+      await redis.expire(key, ttlSeconds);
+    },
   };
 }
 
@@ -75,6 +102,19 @@ export function ioredisPort(client: IORedis): RedisPort {
     publish: (channel, message) => client.publish(channel, message),
     async del(...keys) {
       if (keys.length > 0) await client.del(...keys);
+    },
+    get: (key) => client.get(key),
+    async set(key, value, ttlSeconds) {
+      await client.set(key, value, "EX", ttlSeconds);
+    },
+    async setIfAbsent(key, value, ttlSeconds) {
+      return (await client.set(key, value, "EX", ttlSeconds, "NX")) === "OK";
+    },
+    hgetall: (key) => client.hgetall(key),
+    async hsetMany(key, entries, ttlSeconds) {
+      if (Object.keys(entries).length === 0) return;
+      await client.hset(key, entries);
+      await client.expire(key, ttlSeconds);
     },
   };
 }

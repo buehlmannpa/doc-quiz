@@ -15,7 +15,7 @@ import {
   type ClientTiming,
   type SocketLike,
 } from "./client";
-import type { PublicGameState } from "./game-state";
+import { createInitialState, type PublicGameState } from "./game-state";
 import { CLOSE_CODES } from "./protocol";
 import { ioredisPort } from "./redis-port";
 import { GameStore } from "./store";
@@ -165,7 +165,7 @@ describe.skipIf(!redisUrl)("RealtimeClient (echter Hub)", () => {
       socket.on("message", () => {
         if (answered) return; // Nur das erste hello wird beantwortet, Pings bleiben ohne Antwort.
         answered = true;
-        const state = { code, version: 0, phase: "lobby", createdAt: 1, players: [] };
+        const state = createInitialState(code, 1);
         socket.send(JSON.stringify({ type: "welcome", protocol: 1, role: "screen", serverTime: Date.now(), instanceId: "stumm" }));
         socket.send(JSON.stringify({ type: "state", version: 0, state }));
       });

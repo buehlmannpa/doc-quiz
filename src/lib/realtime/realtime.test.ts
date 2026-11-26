@@ -87,7 +87,7 @@ describe("addPlayer", () => {
   });
 
   it("lässt den Beitritt nur im Warteraum zu", () => {
-    for (const phase of ["running", "finished"] as const) {
+    for (const phase of ["question", "finished"] as const) {
       try {
         addPlayer({ ...base(), phase }, player("1", "Anna"));
         expect.unreachable();

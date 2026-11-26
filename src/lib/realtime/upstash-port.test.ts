@@ -11,6 +11,13 @@ import { upstashPort } from "./redis-port";
 import { GameStore } from "./store";
 import { startFakeUpstash, type FakeUpstash } from "./testing/fake-upstash";
 
+/** Liest eine Kanalnachricht und erwartet einen Zustand (die flüchtigen Nachrichten sind hier nicht gefragt). */
+function stateMessage(raw: string) {
+  const message = channelMessageSchema.parse(JSON.parse(raw));
+  if (message.k !== "state") throw new Error("Es wurde keine Zustandsnachricht erwartet.");
+  return message;
+}
+
 const url = process.env.TEST_REDIS_URL;
 const prefix = `u${Math.random().toString(36).slice(2, 10)}`;
 let counter = 0;
@@ -67,7 +74,7 @@ describe.skipIf(!url)("Upstash Adapter (SDK über HTTP)", () => {
 
     expect(store.publishMode).toBe("script");
     expect(received).toHaveLength(1);
-    expect(channelMessageSchema.parse(JSON.parse(received[0] as string)).state.players[0]?.name).toBe("Berta");
+    expect(stateMessage(received[0] as string).state.players[0]?.name).toBe("Berta");
     await subscriber.unsubscribe(store.channel(code));
     subscriber.removeAllListeners("message");
   });

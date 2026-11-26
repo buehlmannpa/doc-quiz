@@ -5,7 +5,10 @@
  * 1. game:CODE      Hash mit zwei Feldern. v ist die Version, s ist der vollständige öffentliche Zustand als JSON.
  *                   Ein einziger Lesebefehl liefert also den ganzen Zustand.
  * 2. game:CODE:tok  Hash von Token Hash zu Spieler Kennung, für die Anmeldung der Smartphones.
- * 3. Kanal ch:game:CODE  Bei jeder Änderung wird der vollständige Zustand veröffentlicht.
+ * 3. game:CODE:quiz Der Snapshot des Quiz (Fragen samt richtigen Antworten), nur auf dem Server lesbar.
+ *    Weitere Schlüssel des Spielablaufs (Antworten, Punktestände) legt die Spiellogik unter game:CODE:... an.
+ * 4. Kanal ch:game:CODE  Bei jeder Änderung wird der vollständige Zustand veröffentlicht, dazu kommen flüchtige
+ *    Nachrichten (Fortschritt der Antworten, Hüpfen einer Bubble), die nicht gespeichert werden.
  *
  * Änderungen laufen über einen Versionsvergleich in einem Lua Skript, das atomar in Redis ausgeführt wird:
  * Es schreibt nur, wenn die Version noch die ist, die der Aufrufer gelesen hat. Sonst liefert es den aktuellen
@@ -18,6 +21,7 @@
  * funktionsgleich. Die Variante zeigt store.publishMode.
  */
 import { buildChannel, buildKey } from "@/lib/redis/keys";
+import { gameQuizSchema, type GameQuiz } from "@/lib/game/snapshot";
 import {
   addPlayer,
   createInitialState,
@@ -28,17 +32,26 @@ import {
   type JoinFailure,
   type PublicGameState,
   type PublicPlayer,
+  type RuleFailure,
 } from "./game-state";
+import type { ChannelMessage } from "./protocol";
 import type { RedisPort } from "./redis-port";
 import { generatePlayerId, generatePlayerToken, hashPlayerToken } from "./tokens";
 
 /** Ein Spiel lebt höchstens 6 Stunden nach der letzten Änderung. Danach räumt Redis es selbständig auf. */
 export const DEFAULT_GAME_TTL_SECONDS = 6 * 60 * 60;
 
+// KEYS[1] Spiel, KEYS[2] Quiz Snapshot. ARGV: Version, Zustand, TTL, Snapshot (leer bei Spielen ohne Quiz).
+// Beides geschieht atomar: Ein belegter Code lässt den Snapshot eines laufenden Spiels unberührt.
 const CREATE_SCRIPT = `
 if redis.call('EXISTS', KEYS[1]) == 1 then return 0 end
 redis.call('HSET', KEYS[1], 'v', ARGV[1], 's', ARGV[2])
 redis.call('EXPIRE', KEYS[1], ARGV[3])
+if ARGV[4] ~= '' then
+  redis.call('SET', KEYS[2], ARGV[4], 'EX', ARGV[3])
+else
+  redis.call('DEL', KEYS[2])
+end
 return 1
 `;
 
@@ -92,7 +105,22 @@ type ScriptResult = { status: "ok" } | { status: "missing" } | { status: "confli
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
-function parseState(raw: string): PublicGameState {
+const JOIN_FAILURES: readonly RuleFailure[] = [
+  "not_found",
+  "closed",
+  "name_taken",
+  "invalid_name",
+  "invalid_avatar",
+  "full",
+  "busy",
+];
+
+/** Beitritt ist nur im Warteraum möglich. Jeder andere Regelverstoss bedeutet: Das Spiel läuft schon. */
+function toJoinFailure(reason: RuleFailure): JoinFailure {
+  return JOIN_FAILURES.includes(reason) ? (reason as JoinFailure) : "closed";
+}
+
+export function parseState(raw: string): PublicGameState {
   return publicGameStateSchema.parse(JSON.parse(raw));
 }
 
@@ -103,7 +131,7 @@ export class GameStore {
   private publishInScript = true;
 
   constructor(
-    private readonly port: RedisPort,
+    readonly port: RedisPort,
     private readonly options: StoreOptions,
   ) {
     this.ttl = options.ttlSeconds ?? DEFAULT_GAME_TTL_SECONDS;
@@ -128,15 +156,42 @@ export class GameStore {
     return buildChannel(this.options.prefix, "game", code);
   }
 
-  /** Legt ein neues Spiel im Warteraum an. Gibt false zurück, wenn der Code schon belegt ist. */
-  async createGame(code: string): Promise<boolean> {
-    const state = createInitialState(code, this.now());
+  /** Weitere Schlüssel eines Spiels, zum Beispiel game:CODE:ans:3. Alle Teile gehen durch die Prüfung von buildKey. */
+  subKey(code: string, ...parts: (string | number)[]): string {
+    return buildKey(this.options.prefix, "game", code, ...parts.map(String));
+  }
+
+  get ttlSeconds(): number {
+    return this.ttl;
+  }
+
+  /** Veröffentlicht eine flüchtige Nachricht (Fortschritt, Hüpfen). Geht sie verloren, ist das harmlos. */
+  async publishEphemeral(code: string, message: Exclude<ChannelMessage, { k: "state" }>): Promise<void> {
+    await this.port.publish(this.channel(code), JSON.stringify(message));
+  }
+
+  /**
+   * Legt ein neues Spiel im Warteraum an. Gibt false zurück, wenn der Code schon belegt ist.
+   * Mit einem Quiz wird dessen Snapshot im selben Schritt abgelegt. Der Zustand enthält nur Titel und Anzahl Fragen.
+   */
+  async createGame(code: string, quiz: GameQuiz | null = null): Promise<boolean> {
+    const state = createInitialState(
+      code,
+      this.now(),
+      quiz ? { title: quiz.title, questionCount: quiz.questions.length } : null,
+    );
     const result = await this.port.eval(
       CREATE_SCRIPT,
-      [this.gameKey(code)],
-      [state.version, JSON.stringify(state), this.ttl],
+      [this.gameKey(code), this.subKey(code, "quiz")],
+      [state.version, JSON.stringify(state), this.ttl, quiz ? JSON.stringify(quiz) : ""],
     );
     return Number(result) === 1;
+  }
+
+  /** Der Snapshot des Quiz. Null bei Spielen ohne Quiz oder wenn er abgelaufen ist. */
+  async getQuiz(code: string): Promise<GameQuiz | null> {
+    const raw = await this.port.get(this.subKey(code, "quiz"));
+    return raw ? gameQuizSchema.parse(JSON.parse(raw)) : null;
   }
 
   async getState(code: string): Promise<PublicGameState | null> {
@@ -145,7 +200,7 @@ export class GameStore {
   }
 
   async deleteGame(code: string): Promise<void> {
-    await this.port.del(this.gameKey(code), this.tokenKey(code));
+    await this.port.del(this.gameKey(code), this.tokenKey(code), this.subKey(code, "quiz"));
   }
 
   /**
@@ -174,7 +229,7 @@ export class GameStore {
   }
 
   private async runUpdate(code: string, expected: number, next: PublicGameState): Promise<ScriptResult> {
-    const message = JSON.stringify({ v: next.version, state: next });
+    const message = JSON.stringify({ k: "state", v: next.version, state: next } satisfies ChannelMessage);
     const keys = [this.gameKey(code)];
     const common = [expected, next.version, JSON.stringify(next), this.ttl];
 
@@ -238,7 +293,7 @@ export class GameStore {
       outcome = await this.update(code, (state) => addPlayer(state, player), existing);
     } catch (error) {
       await this.port.hdel(tokenKey, tokenHash);
-      if (error instanceof GameRuleError) return { ok: false, reason: error.reason };
+      if (error instanceof GameRuleError) return { ok: false, reason: toJoinFailure(error.reason) };
       throw error;
     }
     if (!outcome.ok) {

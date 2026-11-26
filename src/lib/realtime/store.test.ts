@@ -13,6 +13,13 @@ import { channelMessageSchema } from "./protocol";
 import { ioredisPort, type RedisPort } from "./redis-port";
 import { GameStore } from "./store";
 
+/** Liest eine Kanalnachricht und erwartet einen Zustand (die flüchtigen Nachrichten sind hier nicht gefragt). */
+function stateMessage(raw: string) {
+  const message = channelMessageSchema.parse(JSON.parse(raw));
+  if (message.k !== "state") throw new Error("Es wurde keine Zustandsnachricht erwartet.");
+  return message;
+}
+
 const url = process.env.TEST_REDIS_URL;
 const SECRET = "ein sehr langes testgeheimnis fuer die spielertoken";
 const prefix = `t${Math.random().toString(36).slice(2, 10)}`;
@@ -112,7 +119,7 @@ describe.skipIf(!url)("GameStore (echtes Redis)", () => {
   it("lässt nach dem Start keine neuen Teilnehmenden mehr zu", async () => {
     const code = await newGame();
     const first = await store.joinPlayer(code, { name: "Anna", avatar: 0 });
-    expect((await store.setPhase(code, "running")).ok).toBe(true);
+    expect((await store.setPhase(code, "question")).ok).toBe(true);
     expect(await store.joinPlayer(code, { name: "Berta", avatar: 1 })).toEqual({ ok: false, reason: "closed" });
     // Wer schon dabei ist, kann sich weiterhin verbinden.
     if (!first.ok) throw new Error("Beitritt fehlgeschlagen");
@@ -151,10 +158,10 @@ describe.skipIf(!url)("GameStore (echtes Redis)", () => {
 
   it("serialisiert gleichzeitige Änderungen: keine geht verloren", async () => {
     const code = await newGame();
-    await Promise.all([store.touch(code), store.touch(code), store.touch(code), store.setPhase(code, "running")]);
+    await Promise.all([store.touch(code), store.touch(code), store.touch(code), store.setPhase(code, "question")]);
     const state = await store.getState(code);
     expect(state?.version).toBe(4);
-    expect(state?.phase).toBe("running");
+    expect(state?.phase).toBe("question");
   });
 
   it("weist ein falsches Token, ein Token eines anderen Spiels und ein unbekanntes Spiel ab", async () => {
@@ -182,13 +189,13 @@ describe.skipIf(!url)("GameStore (echtes Redis)", () => {
     await subscriber.subscribe(store.channel(code));
 
     const joined = await store.joinPlayer(code, { name: "Anna", avatar: 5 });
-    await store.setPhase(code, "running");
+    await store.setPhase(code, "question");
     await new Promise((resolve) => setTimeout(resolve, 150));
 
-    const messages = received.map((raw) => channelMessageSchema.parse(JSON.parse(raw)));
+    const messages = received.map((raw) => stateMessage(raw));
     expect(messages.map((m) => m.v)).toEqual([1, 2]);
     expect(messages[0]?.state.players).toHaveLength(1);
-    expect(messages[1]?.state.phase).toBe("running");
+    expect(messages[1]?.state.phase).toBe("question");
     expect(joined.ok && messages[0]?.state.players[0]?.id === joined.player.id).toBe(true);
     await subscriber.unsubscribe(store.channel(code));
     subscriber.removeAllListeners("message");
@@ -229,7 +236,7 @@ describe.skipIf(!url)("GameStore (echtes Redis)", () => {
     expect(joined.ok).toBe(true);
     expect(fallbackStore.publishMode).toBe("separate");
     expect(received).toHaveLength(1);
-    expect(channelMessageSchema.parse(JSON.parse(received[0] as string)).v).toBe(1);
+    expect(stateMessage(received[0] as string).v).toBe(1);
     await subscriber.unsubscribe(fallbackStore.channel(code));
     subscriber.removeAllListeners("message");
   });

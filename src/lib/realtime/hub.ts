@@ -20,12 +20,14 @@
  */
 import { randomUUID } from "node:crypto";
 import type { RawData, WebSocket } from "ws";
+import type { GameController } from "./controller";
 import type { PublicGameState, PublicPlayer } from "./game-state";
 import {
   channelMessageSchema,
   clientMessageSchema,
   CLOSE_CODES,
   PROTOCOL_VERSION,
+  type ClientMessage,
   type HelloMessage,
   type Role,
   type ServerMessage,
@@ -64,6 +66,9 @@ export type HubLimits = {
   maxConnections: number;
 };
 
+/** Mindestabstand zwischen zwei Sprüngen derselben Bubble. */
+export const NUDGE_INTERVAL_MS = 2_000;
+
 export const DEFAULT_HUB_LIMITS: HubLimits = {
   helloTimeoutMs: 5_000,
   joinTimeoutMs: 15_000,
@@ -79,6 +84,8 @@ export const DEFAULT_HUB_LIMITS: HubLimits = {
 export type HubOptions = {
   store: GameStore;
   subscriber: SubscriberPort;
+  /** Spiellogik für Antworten, Befehle und Zeitablauf. Ohne sie nimmt der Hub nur Zustände entgegen (Tests, Labor). */
+  controller?: GameController;
   instanceId?: string;
   limits?: Partial<HubLimits>;
   now?: () => number;
@@ -95,6 +102,10 @@ type Group = {
   readyAt: number | null;
   latestVersion: number;
   latestPayload: string | null;
+  /** Der zuletzt bekannte Zustand. Dient als Hinweis für die Spiellogik und spart Lesebefehle. */
+  latestState: PublicGameState | null;
+  /** Verhindert, dass viele gleichzeitige Zeit Hinweise dieselbe Auflösung mehrfach anstossen. */
+  tickInFlight: boolean;
   /** Erstellungszeit des Spiels, dessen Zustand zuletzt gesehen wurde. Unterscheidet zwei Spiele mit demselben Code. */
   createdAt: number | null;
   idleTimer: ReturnType<typeof setTimeout> | null;
@@ -112,6 +123,9 @@ type Connection = {
   tokens: number;
   refilledAt: number;
   helloStarted: boolean;
+  /** Erst nach dem Zustandsabgleich beim Verbinden werden Antworten und Befehle angenommen. */
+  ready: boolean;
+  lastNudgeAt: number;
   closed: boolean;
   /** Frist für die erste Nachricht. Wird nach dem Eintreffen von hello entfernt. */
   helloTimer: ReturnType<typeof setTimeout> | null;
@@ -129,6 +143,7 @@ export class RealtimeHub {
   readonly instanceId: string;
   private readonly store: GameStore;
   private readonly subscriber: SubscriberPort;
+  private readonly controller: GameController | null;
   private readonly limits: HubLimits;
   private readonly now: () => number;
   private readonly log: (event: string, data: Record<string, unknown>) => void;
@@ -139,6 +154,7 @@ export class RealtimeHub {
   constructor(options: HubOptions) {
     this.store = options.store;
     this.subscriber = options.subscriber;
+    this.controller = options.controller ?? null;
     this.instanceId = options.instanceId ?? randomUUID().slice(0, 8);
     this.limits = { ...DEFAULT_HUB_LIMITS, ...options.limits };
     this.now = options.now ?? Date.now;
@@ -168,6 +184,8 @@ export class RealtimeHub {
       tokens: this.limits.burst,
       refilledAt: now,
       helloStarted: false,
+      ready: false,
+      lastNudgeAt: -Infinity,
       closed: false,
       helloTimer: null,
       timers: [],
@@ -237,6 +255,10 @@ export class RealtimeHub {
       this.send(conn, { type: "pong", t0: message.t0, serverTime: this.now() });
       return;
     }
+    if (message.type !== "hello") {
+      this.onGameMessage(conn, message);
+      return;
+    }
     // Ab hier ist es ein "hello". Es ist nur genau eines erlaubt.
     if (conn.helloStarted) {
       this.reject(conn, CLOSE_CODES.INVALID_MESSAGE, "invalid_message", "Die Anmeldung wurde bereits gesendet.");
@@ -247,6 +269,78 @@ export class RealtimeHub {
       this.log("hello_failed", { conn: conn.id, message: error instanceof Error ? error.message : String(error) });
       this.reject(conn, CLOSE_CODES.SERVER_ERROR, "server_error", "Der Dienst ist vorübergehend nicht verfügbar.");
     });
+  }
+
+  /**
+   * Nachrichten des Spielablaufs. Sie sind erst nach der Anmeldung erlaubt. Die Rolle wird bei jeder Nachricht
+   * geprüft, nicht nur bei der Anmeldung: Nur der Admin darf Befehle senden, nur Spieler dürfen antworten.
+   * Fehler der Spiellogik gehen als "ack" zurück und beenden die Verbindung nicht.
+   */
+  private onGameMessage(conn: Connection, message: Exclude<ClientMessage, { type: "hello" | "ping" }>): void {
+    const group = conn.group;
+    if (!conn.ready || !group || !conn.role) {
+      this.reject(conn, CLOSE_CODES.INVALID_MESSAGE, "invalid_message", "Bitte zuerst anmelden.");
+      return;
+    }
+    const controller = this.controller;
+    const ack = (id: string | undefined, ok: boolean, error?: string) =>
+      this.send(conn, { type: "ack", ...(id !== undefined ? { id } : {}), ok, ...(error !== undefined ? { error } : {}) });
+    const fail = (id: string | undefined, error: unknown) => {
+      this.log("controller_failed", { conn: conn.id, message: error instanceof Error ? error.message : String(error) });
+      ack(id, false, "server_error");
+    };
+
+    switch (message.type) {
+      case "answer": {
+        if (conn.role !== "player" || !conn.player || !controller) {
+          ack(message.id, false, "forbidden");
+          return;
+        }
+        controller
+          .answer(
+            group.code,
+            conn.player.id,
+            { q: message.q, option: message.option, value: message.value },
+            group.latestState,
+          )
+          .then((result) => ack(message.id, result.ok, result.ok ? undefined : result.error))
+          .catch((error: unknown) => fail(message.id, error));
+        return;
+      }
+      case "cmd": {
+        if (conn.role !== "admin" || !controller) {
+          ack(message.id, false, "forbidden");
+          return;
+        }
+        controller
+          .command(group.code, message.cmd, message.expectedVersion)
+          .then((result) => ack(message.id, result.ok, result.ok ? undefined : result.error))
+          .catch((error: unknown) => fail(message.id, error));
+        return;
+      }
+      case "tick": {
+        // Jeder angemeldete Client darf anstossen. Die Spiellogik prüft die Frist selbst. Pro Gruppe läuft höchstens
+        // eine Prüfung gleichzeitig, damit 60 Geräte nicht 60 Lesebefehle auslösen.
+        if (!controller || group.tickInFlight) return;
+        group.tickInFlight = true;
+        controller
+          .tick(group.code, group.latestState)
+          .catch((error: unknown) => this.log("tick_failed", { code: group.code, message: String(error) }))
+          .finally(() => {
+            group.tickInFlight = false;
+          });
+        return;
+      }
+      case "nudge": {
+        // Die Bubble hüpft höchstens einmal in 2 Sekunden und nur im Warteraum. Nichts davon wird gespeichert.
+        if (conn.role !== "player" || !conn.player || group.latestState?.phase !== "lobby") return;
+        const now = this.now();
+        if (now - conn.lastNudgeAt < NUDGE_INTERVAL_MS) return;
+        conn.lastNudgeAt = now;
+        this.store.publishEphemeral(group.code, { k: "nudge", id: conn.player.id }).catch(() => {});
+        return;
+      }
+    }
   }
 
   /** Token Bucket: erlaubt kurze Stösse und begrenzt den Dauerdurchsatz. */
@@ -335,6 +429,7 @@ export class RealtimeHub {
     }
 
     this.adoptGame(group, state);
+    if (!group.latestState || state.version >= group.latestState.version) group.latestState = state;
 
     this.send(conn, {
       type: "welcome",
@@ -356,7 +451,30 @@ export class RealtimeHub {
       }
       this.sendRaw(conn, payload, state.version);
     }
+    conn.ready = true;
     this.log("ws_ready", { conn: conn.id, role: hello.role, code: hello.code, version: state.version });
+    void this.sendResume(conn, group);
+  }
+
+  /**
+   * Nach einer Wiederverbindung während einer Frage: Der Spieler erfährt seine eigene Antwort, Beamer und Admin den
+   * bisherigen Fortschritt. Das ist ergänzend, der Zustand selbst kam schon mit dem Zustandsabgleich.
+   */
+  private async sendResume(conn: Connection, group: Group): Promise<void> {
+    const controller = this.controller;
+    const state = group.latestState;
+    if (!controller || !state || state.phase !== "question" || !state.question) return;
+    try {
+      if (conn.role === "player" && conn.player) {
+        const mine = await controller.mine(group.code, conn.player.id, state.question.index);
+        if (mine) this.send(conn, { type: "mine", q: state.question.index, ...mine });
+      } else if (conn.role === "screen" || conn.role === "admin") {
+        const n = await controller.progress(group.code, state.question.index);
+        this.send(conn, { type: "progress", q: state.question.index, n });
+      }
+    } catch (error) {
+      this.log("resume_failed", { conn: conn.id, message: error instanceof Error ? error.message : String(error) });
+    }
   }
 
   // ---------------------------------------------------------------------------------------------------------
@@ -373,6 +491,8 @@ export class RealtimeHub {
       readyAt: null,
       latestVersion: -1,
       latestPayload: null,
+      latestState: null,
+      tickInFlight: false,
       createdAt: null,
       idleTimer: null,
     };
@@ -401,7 +521,36 @@ export class RealtimeHub {
       this.log("channel_message_invalid", { code: group.code });
       return;
     }
-    this.deliver(group, parsed.data.v, parsed.data.state);
+    const message = parsed.data;
+    switch (message.k) {
+      case "state":
+        this.deliver(group, message.v, message.state);
+        return;
+      case "progress": {
+        // Nur Beamer und Admin zeigen den Fortschritt. Die Smartphones brauchen ihn nicht.
+        const payload = JSON.stringify({ type: "progress", q: message.q, n: message.n } satisfies ServerMessage);
+        this.broadcastTo(group, ["screen", "admin"], payload);
+        return;
+      }
+      case "nudge": {
+        const payload = JSON.stringify({ type: "nudge", id: message.id } satisfies ServerMessage);
+        this.broadcastTo(group, ["screen", "admin"], payload);
+        return;
+      }
+    }
+  }
+
+  /** Flüchtige Nachrichten ohne Versionsprüfung, nur an bestimmte Rollen. */
+  private broadcastTo(group: Group, roles: readonly Role[], payload: string): void {
+    for (const conn of group.conns) {
+      if (!conn.ready || !conn.role || !roles.includes(conn.role)) continue;
+      if (conn.closed || conn.ws.readyState !== conn.ws.OPEN) continue;
+      if (conn.ws.bufferedAmount > this.limits.maxBufferedBytes) {
+        this.closeNow(conn, CLOSE_CODES.SLOW_CONSUMER, "slow_consumer");
+        continue;
+      }
+      conn.ws.send(payload);
+    }
   }
 
   /**
@@ -413,6 +562,7 @@ export class RealtimeHub {
     if (group.createdAt !== null && group.createdAt !== state.createdAt) {
       group.latestVersion = -1;
       group.latestPayload = null;
+      group.latestState = null;
       for (const conn of group.conns) conn.lastSentVersion = -1;
       this.log("game_replaced", { code: group.code });
     }
@@ -424,6 +574,7 @@ export class RealtimeHub {
     this.adoptGame(group, state);
     if (version <= group.latestVersion) return;
     group.latestVersion = version;
+    group.latestState = state;
     // Der Text ist für alle gleich und wird nur einmal gebaut.
     const payload = JSON.stringify({ type: "state", version, state } satisfies ServerMessage);
     group.latestPayload = payload;

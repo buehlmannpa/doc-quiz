@@ -60,9 +60,49 @@ export const helloSchema = z
 
 export const pingSchema = z.object({ type: z.literal("ping"), t0: z.number().finite() });
 
-export const clientMessageSchema = z.discriminatedUnion("type", [helloSchema, pingSchema]);
+/**
+ * Antwort eines Spielers. q ist die Nummer der Frage, auf die sich die Antwort bezieht (schützt vor Antworten auf
+ * eine frühere Frage). Genau eines von option (Multiple Choice, Umfrage) und value (Schätzfrage).
+ */
+export const answerSchema = z
+  .object({
+    type: z.literal("answer"),
+    id: z.string().max(40).optional(),
+    q: z.number().int().min(0).max(1000),
+    option: z.number().int().min(0).max(3).optional(),
+    value: z.number().finite().min(-1e12).max(1e12).optional(),
+  })
+  .refine((answer) => (answer.option !== undefined) !== (answer.value !== undefined), {
+    message: "Genau eines von option und value ist nötig.",
+  });
+
+/** Steuerbefehle des Admins. expectedVersion schützt vor doppelten Klicks und veralteten Bildschirmen. */
+export const COMMANDS = ["start", "resolve", "next", "reveal", "finish", "abort"] as const;
+export type Command = (typeof COMMANDS)[number];
+export const cmdSchema = z.object({
+  type: z.literal("cmd"),
+  id: z.string().max(40).optional(),
+  cmd: z.enum(COMMANDS),
+  expectedVersion: z.number().int().min(0).optional(),
+});
+
+/** Hinweis eines Geräts, dass seine Zeit abgelaufen ist. Der Server prüft selbst, ob es stimmt. */
+export const tickSchema = z.object({ type: z.literal("tick") });
+/** Lässt die eigene Bubble im Warteraum hüpfen. */
+export const nudgeSchema = z.object({ type: z.literal("nudge") });
+
+export const clientMessageSchema = z.discriminatedUnion("type", [
+  helloSchema,
+  pingSchema,
+  answerSchema,
+  cmdSchema,
+  tickSchema,
+  nudgeSchema,
+]);
 export type ClientMessage = z.infer<typeof clientMessageSchema>;
 export type HelloMessage = z.infer<typeof helloSchema>;
+export type AnswerMessage = z.infer<typeof answerSchema>;
+export type CmdMessage = z.infer<typeof cmdSchema>;
 
 export const serverMessageSchema = z.discriminatedUnion("type", [
   z.object({
@@ -79,9 +119,29 @@ export const serverMessageSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("pong"), t0: z.number(), serverTime: z.number() }),
   z.object({ type: z.literal("reconnect"), reason: z.enum(["max_age", "server_shutdown"]) }),
   z.object({ type: z.literal("error"), code: z.string(), message: z.string() }),
+  /** Antwort auf eine Antwort oder einen Befehl. id ist die Kennung aus der Anfrage. */
+  z.object({ type: z.literal("ack"), id: z.string().optional(), ok: z.boolean(), error: z.string().optional() }),
+  /** Zahl der bisher eingegangenen Antworten auf die aktuelle Frage. */
+  z.object({ type: z.literal("progress"), q: z.number().int().min(0), n: z.number().int().min(0) }),
+  /** Eine Bubble hüpft im Warteraum. */
+  z.object({ type: z.literal("nudge"), id: z.string() }),
+  /** Dieser Spieler hat die Frage q schon beantwortet (nach einer Wiederverbindung). */
+  z.object({
+    type: z.literal("mine"),
+    q: z.number().int().min(0),
+    option: z.number().int().optional(),
+    value: z.number().optional(),
+  }),
 ]);
 export type ServerMessage = z.infer<typeof serverMessageSchema>;
 
-/** Nachricht auf dem Redis Kanal: der vollständige öffentliche Zustand samt Version. */
-export const channelMessageSchema = z.object({ v: z.number().int().min(0), state: publicGameStateSchema });
+/**
+ * Nachrichten auf dem Redis Kanal eines Spiels. "state" trägt den vollständigen öffentlichen Zustand samt Version.
+ * "progress" und "nudge" sind flüchtig und werden nicht gespeichert: Gehen sie verloren, ist das harmlos.
+ */
+export const channelMessageSchema = z.discriminatedUnion("k", [
+  z.object({ k: z.literal("state"), v: z.number().int().min(0), state: publicGameStateSchema }),
+  z.object({ k: z.literal("progress"), q: z.number().int().min(0), n: z.number().int().min(0) }),
+  z.object({ k: z.literal("nudge"), id: z.string() }),
+]);
 export type ChannelMessage = z.infer<typeof channelMessageSchema>;

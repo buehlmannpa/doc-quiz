@@ -216,7 +216,7 @@ describe.skipIf(!redisUrl)("RealtimeHub (echte WebSockets, echtes Redis)", () =>
 
     // Während der Abwesenheit passiert einiges.
     await store.joinPlayer(code, { name: "Berta", avatar: 1 });
-    await store.setPhase(code, "running");
+    await store.setPhase(code, "question");
     await store.touch(code);
 
     const second = await connect(a);
@@ -224,7 +224,7 @@ describe.skipIf(!redisUrl)("RealtimeHub (echte WebSockets, echtes Redis)", () =>
     await until(() => second.states().length >= 1);
     // Der Statusabgleich beim Verbinden ist massgebend: genau der aktuelle Zustand, nicht der alte.
     expect(second.states()[0]?.version).toBe(4);
-    expect(second.states()[0]?.state.phase).toBe("running");
+    expect(second.states()[0]?.state.phase).toBe("question");
     expect(second.states()[0]?.state.players.map((p) => p.name)).toEqual(["Anna", "Berta"]);
   });
 
@@ -487,7 +487,7 @@ describe.skipIf(!redisUrl)("RealtimeHub (echte WebSockets, echtes Redis)", () =>
     const current = await store.getState(code);
     const inject = holder.inject;
     if (!current || !inject) throw new Error("Zustand oder Handler fehlt");
-    const message = (version: number) => JSON.stringify({ v: version, state: { ...current, version } });
+    const message = (version: number) => JSON.stringify({ k: "state", v: version, state: { ...current, version } });
     const before = client.states().length;
 
     inject(message(2)); // veraltet
