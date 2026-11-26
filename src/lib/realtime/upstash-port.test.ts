@@ -4,6 +4,8 @@
  * Läuft nur mit TEST_REDIS_URL (siehe store.test.ts).
  */
 import { Redis } from "@upstash/redis";
+import { GameEngine } from "@/lib/game/engine";
+import type { GameQuiz } from "@/lib/game/snapshot";
 import IORedis from "ioredis";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { channelMessageSchema } from "./protocol";
@@ -97,4 +99,96 @@ describe.skipIf(!url)("Upstash Adapter (SDK über HTTP)", () => {
     const auth = await store.authenticatePlayer(code, joined.token);
     expect(auth.ok).toBe(true);
   });
+
+  it("bedient die zusätzlichen Operationen der Spiellogik über das SDK", async () => {
+    const port = upstashPort(new Redis({ url: fake.url, token: "test", automaticDeserialization: false, retry: false }));
+    const key = `${prefix}:ops:${nextCode()}`;
+    // Werte, die wie JSON oder Zahlen aussehen, müssen als Text zurückkommen (keine automatische Umwandlung).
+    await port.set(key, '{"a":1}', 60);
+    expect(await port.get(key)).toBe('{"a":1}');
+    expect(await port.get(`${key}:fehlt`)).toBeNull();
+    expect(await port.setIfAbsent(key, "neu", 60)).toBe(false);
+    expect(await port.setIfAbsent(`${key}:neu`, "123", 60)).toBe(true);
+    expect(await port.get(`${key}:neu`)).toBe("123");
+
+    const hash = `${key}:hash`;
+    expect(await port.hgetall(hash)).toEqual({});
+    await port.hsetMany(hash, { eins: '{"x":1}', zwei: "2", drei: "true" }, 60);
+    expect(await port.hgetall(hash)).toEqual({ eins: '{"x":1}', zwei: "2", drei: "true" });
+    expect(await direct.ttl(hash)).toBeGreaterThan(0);
+    await port.hsetMany(hash, {}, 60);
+    await port.del(key, `${key}:neu`, hash);
+    expect(await port.get(key)).toBeNull();
+  });
+
+  it("spielt ein ganzes Quiz mit der Engine über das SDK", async () => {
+    const quiz: GameQuiz = {
+      quizId: "q",
+      title: "SDK",
+      questions: [
+        {
+          id: "q1",
+          type: "multiple_choice",
+          prompt: "Farbe?",
+          timeLimitSeconds: 20,
+          maxPoints: 1000,
+          options: [
+            { id: "a", text: "Blau", isCorrect: false },
+            { id: "b", text: "Rot", isCorrect: true },
+          ],
+          correctValue: null,
+          unit: null,
+          tolerance: null,
+        },
+        {
+          id: "q2",
+          type: "estimate",
+          prompt: "PS?",
+          timeLimitSeconds: 20,
+          maxPoints: 1000,
+          options: [],
+          correctValue: 200,
+          unit: "PS",
+          tolerance: 100,
+        },
+      ],
+    };
+    const code = nextCode();
+    expect(await store.createGame(code, quiz)).toBe(true);
+    const ids: string[] = [];
+    for (const name of ["Anna", "Beat"]) {
+      const joined = await store.joinPlayer(code, { name, avatar: 1 });
+      if (!joined.ok) throw new Error(joined.reason);
+      ids.push(joined.player.id);
+    }
+    const saved: number[] = [];
+    let clock = 1_000_000;
+    const engine = new GameEngine(store, { now: () => clock, hooks: { onFinished: async (outcome) => void saved.push(outcome.finalRows.length) } });
+
+    expect((await engine.start(code)).ok).toBe(true);
+    clock += 1000;
+    expect(await engine.answer(code, ids[0] as string, { q: 0, option: 1 }, null)).toEqual({ ok: true });
+    expect(await engine.answer(code, ids[0] as string, { q: 0, option: 0 }, null)).toEqual({ ok: false, error: "already_answered" });
+    expect(await engine.progress(code, 0)).toBe(1);
+    expect(await engine.mine(code, ids[0] as string, 0)).toEqual({ option: 1 });
+    expect(await engine.answer(code, ids[1] as string, { q: 0, option: 0 }, null)).toEqual({ ok: true });
+    let state = await store.getState(code);
+    expect(state?.phase).toBe("resolved");
+    expect(state?.results[ids[0] as string]).toMatchObject({ correct: true, rank: 1 });
+    expect(state?.results[ids[1] as string]).toMatchObject({ correct: false, rank: 2 });
+
+    expect((await engine.next(code)).ok).toBe(true);
+    clock += 500;
+    await engine.answer(code, ids[0] as string, { q: 1, value: 190 }, null);
+    await engine.answer(code, ids[1] as string, { q: 1, value: 200 }, null);
+    state = await store.getState(code);
+    expect(state?.phase).toBe("podium");
+    expect(saved).toEqual([2]);
+    expect((await engine.reveal(code)).ok).toBe(true);
+    expect((await engine.reveal(code)).ok).toBe(true);
+    state = await store.getState(code);
+    expect(state?.podium?.ranking?.map((row) => row.name)).toEqual(["Anna", "Beat"]);
+    expect((await engine.finish(code)).ok).toBe(true);
+  });
+
 });
