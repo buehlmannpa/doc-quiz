@@ -59,6 +59,7 @@ export function getEngine(): GameEngine {
   if (!g.__quizEngine) {
     g.__quizEngine = new GameEngine(getGameStore(), {
       hooks: createSessionHooks(),
+      persistInBackground: true,
       log: (event, data) => console.log(JSON.stringify({ evt: event, ...data })),
     });
   }

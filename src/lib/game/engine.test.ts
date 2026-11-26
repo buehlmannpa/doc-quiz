@@ -479,6 +479,30 @@ describe.skipIf(!url)("GameEngine (echtes Redis)", () => {
       expect(outcomes[0]?.players).toHaveLength(1);
     });
 
+    it("speichert auf Wunsch im Hintergrund, ohne die letzte Antwort warten zu lassen", async () => {
+      const outcomes: GameOutcome[] = [];
+      const engine = new GameEngine(store, {
+        now,
+        persistInBackground: true,
+        hooks: {
+          onFinished: async (outcome) => {
+            await new Promise((resolve) => setTimeout(resolve, 150));
+            outcomes.push(outcome);
+          },
+        },
+      });
+      const short: GameQuiz = { ...quiz, questions: [quiz.questions[0] as GameQuiz["questions"][number]] };
+      const { code, ids } = await setup(1, short);
+      await engine.start(code);
+      const startedAt = Date.now();
+      await engine.answer(code, ids[0] as string, { q: 0, option: 1 }, null);
+      expect(Date.now() - startedAt).toBeLessThan(120);
+      expect((await stateOf(code)).phase).toBe("podium");
+      expect(outcomes).toHaveLength(0);
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      expect(outcomes).toHaveLength(1);
+    });
+
     it("liefert die Resultate erst, wenn das Spiel beendet ist", async () => {
       const engine = makeEngine();
       const { code } = await setup(1);

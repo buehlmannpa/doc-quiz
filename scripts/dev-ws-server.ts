@@ -33,6 +33,7 @@ const store = new GameStore(ioredisPort(new IORedis(redisUrl)), { prefix: getKey
 // Neon wird nur bei Gebrauch angesprochen. Ohne DATABASE_URL läuft das Spiel trotzdem, nur ohne Speichern der Resultate.
 const engine = new GameEngine(store, {
   hooks: createSessionHooks(),
+  persistInBackground: true,
   log: (event, data) => console.log(`[engine] ${event} ${JSON.stringify(data)}`),
 });
 const hub = new RealtimeHub({

@@ -21,7 +21,7 @@ Rahmen: rund 60 gleichzeitige Teilnehmende, ein einziger Admin, Oberfläche auf 
 
 1. **Neon ist das Langzeitgedächtnis, Redis das Kurzzeitgedächtnis.** Beim Spielstart wird das Quiz einmal aus Neon als Snapshot nach Redis geladen. Während des Spiels wird Neon weder gelesen noch geschrieben. Die Resultate gehen gesammelt nach Neon, sobald die letzte Frage endet.
 2. **Der Server ist die einzige Wahrheit.** Zeitmessung, Annahme von Antworten und Punkteberechnung geschehen serverseitig mit Serverzeitstempeln. Pro Frage gibt es Start und Ablaufzeit. Antworten nach Ablauf lehnt der Server ab. Pro Spieler und Frage wird nur eine Antwort angenommen (`HSETNX`).
-3. **Keine Server Timer.** Funktionen haben keine dauerhaften Hintergrundprozesse. Das Ende einer Frage löst aus: der Server selbst, sobald alle geantwortet haben, sonst der Browser des Admins bei Zeitablauf. Der Server prüft den Ablauf. Ist der Admin Browser nicht verbunden, wartet das Spiel. Manuell geht jederzeit.
+3. **Keine Server Timer.** Funktionen haben keine dauerhaften Hintergrundprozesse. Das Ende einer Frage löst aus: der Server selbst, sobald alle geantwortet haben, sonst ein Browser bei Zeitablauf (zuerst Beamer und Admin Browser, als Absicherung nach 1.5 Sekunden auch die Smartphones). Der Server prüft den Ablauf selbst und handelt nur, wenn die Zeit wirklich abgelaufen ist. Die Spezifikation verlangte, dass das Spiel wartet, wenn der Admin Browser nicht verbunden ist. Das ist bewusst abgeschwächt (Annahme 10 in `docs/ANNAHMEN.md`, zu bestätigen). Manuell geht jederzeit.
 4. **Eine Verbindung pro Gerät, ein Subscriber pro Instanz.** Jede WebSocket Verbindung ist an eine Funktionsinstanz gebunden. Pro Instanz und Spiel gibt es genau einen Redis Subscriber, der Nachrichten im Speicher an die lokalen Sockets verteilt.
 5. **Subscribe über ioredis (TCP), nicht über das Upstash SDK.** Im Quellcode des SDK (Version 1.41.1) endet der SSE Stream bei einem Abbruch still, ohne Wiederverbindung und ohne Fehlerereignis, und Lesefehler gehen nur an `console.error`. Eine tote Subscription würde unbemerkt Nachrichten verlieren. ioredis ist der in der Upstash Dokumentation gezeigte Client für SUBSCRIBE und verbindet sich selbständig neu. Der Entscheid ist in der Echtzeit Schicht umgesetzt und mit einem echten Redis getestet, einschliesslich eines erzwungenen Abbruchs der Subscriber Verbindung. Auf Vercel bestätigt ihn das Verbindungslabor (`docs/VERBINDUNGSTEST.md`).
 6. **Nachrichten tragen eine Zustandsversion.** Eine Lücke bei einer Nachricht (zum Beispiel während einer Wiederverbindung des Subscribers) führt zu einem Neuabgleich des vollständigen Zustands aus Redis. Ein verlorenes Publish bleibt so folgenlos.
@@ -97,8 +97,28 @@ Abweichungen und Ergänzungen gegenüber dem Vorschlag der Spezifikation:
 10. **Endpunkt `/api/ws`:** prüft den Origin (Schutz gegen Cross Site WebSocket Hijacking, Browser ohne passenden Origin werden mit 403 abgewiesen), bestimmt die Admin Berechtigung einmal beim Aufbau aus dem Cookie und übergibt dem Hub. Die Rolle Admin ist nur mit dieser Berechtigung möglich.
 11. **Client:** Neuaufbau (erst neue Verbindung, dann die alte schliessen), Backoff mit Zufall (500 Millisekunden bis 10 Sekunden), Altersgrenze 240 Sekunden, Herzschlag alle 15 Sekunden (nach 45 Sekunden Stille gilt die Verbindung als tot), `checkAlive` für das Aufwachen aus dem Standby, Uhrenabgleich mit der Messung der kleinsten Laufzeit, endgültige Fehler stoppen den Client. Die Anbindung an die Seite (Sichtbarkeit, Wake Lock, React Hook) folgt in Meilenstein 4 mit den Ansichten.
 12. **Lokale Entwicklung:** `npm run dev:ws` startet einen eigenen WebSocket Server mit demselben Hub, weil `next dev` keinen Upgrade kennt. Ohne REST Zugang von Upstash arbeitet der Spielspeicher über `REDIS_URL`.
-13. **Tests:** 118 Tests der Echtzeit Schicht gegen echtes Redis und echte WebSockets (zwei simulierte Instanzen), dazu Mutationsprüfungen der kritischen Logik (erneutes Lesen nach dem Abonnieren, Versionsprüfung, Neuabgleich, wiederverwendeter Code). Der Adapter für das Upstash SDK läuft über einen Ersatzserver (`testing/fake-upstash.ts`).
+13. **Tests:** Tests der Echtzeit Schicht gegen echtes Redis und echte WebSockets (zwei simulierte Instanzen), dazu Mutationsprüfungen der kritischen Logik (erneutes Lesen nach dem Abonnieren, Versionsprüfung, Neuabgleich, wiederverwendeter Code). Der Adapter für das Upstash SDK läuft über einen Ersatzserver (`testing/fake-upstash.ts`), auch mit einem ganzen Quiz der Engine.
 14. **Verbindungslabor** (`/admin/lab`): misst im Browser mit bis zu 60 simulierten Teilnehmenden. Siehe `docs/VERBINDUNGSTEST.md`.
+
+## Spielablauf Schicht (Meilensteine 4 bis 8)
+
+Umgesetzt und lokal im Browser geprüft (Playwright mit Beamer, Admin und vier Smartphones), aber noch nicht abgenommen und auf Vercel nicht gemessen. Alle getroffenen Annahmen stehen in `docs/ANNAHMEN.md`.
+
+1. **Dateien in `src/lib/game`:** `scoring.ts` (Punkte und Rangliste, ganze Zahlen), `evaluate.ts` (Auswertung einer Frage, Podest), `snapshot.ts` (Kopie des Quiz für Redis), `engine.ts` (Spielablauf), `sessions.ts` (Durchführungen in Neon), `lifecycle.ts` (Anlegen und Abbrechen), `results.ts` (Kennzahlen pro Frage), `nextAction.ts` (nächste Aktion des Admins), `avatars.ts`, `bubbles.ts` (Physik), `playerStorage.ts` (Token im Browser), `qr.ts`. `src/lib/realtime/controller.ts` ist die Schnittstelle zwischen Hub und Engine, `useGame.ts` der React Hook.
+2. **Zustand:** Phasen `lobby`, `question`, `resolved`, `podium`, `finished`. Der öffentliche Zustand trägt Quiz Titel, aktuelle Frage (ohne richtige Antwort), Auflösung, Ergebnisse aller Spieler und das Podest. `finished` ohne Podest heisst abgebrochen.
+3. **Redis Schlüssel pro Spiel:** `game:CODE:quiz` (Snapshot mit richtigen Antworten, nur auf dem Server), `game:CODE:ans:Q` (Antworten, plus Feld `#closed` nach der Auflösung), `game:CODE:scores:Q` (Stand und Antwort jedes Spielers nach Frage Q, pro Frage ein Hash, deshalb ist die Auflösung wiederholbar), `game:CODE:final` (Endrangliste, bleibt geheim bis zur Enthüllung).
+4. **Antwort annehmen:** Ein Lua Skript prüft die Flagge `#closed`, setzt die Antwort mit HSETNX (eine pro Spieler) und liefert die Zahl der Antworten. Die Antwortzeit ist die Serverzeit der Annahme minus Start der Frage. Antworten bis 300 Millisekunden nach Ablauf zählen mit der vollen Zeit, danach lehnt der Server ab. Haben alle geantwortet, löst der Server sofort auf.
+5. **Auflösen:** Ein Lua Skript schliesst die Antworten und liest sie im selben Schritt. Danach wird gerechnet (deterministisch), der Stand der Frage abgelegt und der Zustand mit Versionsvergleich geändert. Zwei gleichzeitige Auslöser (Klick, Zeitablauf, letzte Antwort) rechnen dasselbe, nur einer gewinnt, der andere erkennt es und tut nichts.
+6. **Befehle** (`start`, `resolve`, `next`, `reveal`, `finish`, `abort`) tragen die erwartete Version der Ansicht, auf der geklickt wurde. Der Hub nimmt sie nur von der Rolle Admin an, Antworten nur von Spielern, bei jeder Nachricht geprüft. Fehler kommen als Quittung (`ack`) zurück und beenden die Verbindung nicht.
+7. **Zeithinweis:** Der Client meldet mit `tick`, dass die Zeit abgelaufen ist, und wiederholt es alle 2 Sekunden, bis die Frage aufgelöst ist. Der Server prüft die Frist selbst. Pro Hub läuft höchstens eine Prüfung gleichzeitig.
+8. **Flüchtige Nachrichten:** `progress` (Zahl der Antworten, nur an Beamer und Admin) und `nudge` (Bubble hüpft, nur an Beamer und Admin, höchstens alle 2 Sekunden und Person) gehen über denselben Kanal, werden aber nicht gespeichert. Nach einer Wiederverbindung meldet der Server Spielern die eigene Antwort (`mine`) und Beamer und Admin den Fortschritt.
+9. **Geheimhaltung:** Richtige Antworten und die Endrangliste verlassen den Server erst mit der Auflösung beziehungsweise der Enthüllung. Nach der letzten Frage enthalten die Ergebnisse keine Gesamtpunkte und keinen Rang, bis Platz 1 enthüllt ist. Tests prüfen das (Mutationsprüfung der Gesamtpunkte).
+10. **Neon:** Anlegen einer Durchführung sperrt die Quizzeile und nimmt ein Advisory Lock (nur eine aktive Durchführung, auch bei gleichzeitigem Start), prüft Status Bereit und bildet den Snapshot. Der Start setzt `running`. Mit dem Ende der letzten Frage werden Spieler und Antworten in einer Transaktion gespeichert und die Durchführung wird `finished` (wiederholbar, mit bis zu drei Versuchen und einem Knopf zum Wiederholen). Im Betrieb läuft das Speichern im Hintergrund, damit ein kalter Start von Neon die Quittung der letzten Antwort nicht aufhält. Die Spieler Kennung aus Redis (UUID) ist auch die Kennung in Neon. Ein Abbruch gibt `cancelled` ohne Resultate.
+11. **Beitritt:** `POST /api/join` mit Origin Prüfung, Begrenzung pro IP (120 in 10 Minuten) und Zod. Das Token erhält nur der Browser des Spielers (localStorage). `GET /api/join?code=` sagt, ob das Spiel offen ist.
+12. **Oberflächen:** Smartphone `/join`, `/join/[code]`, `/play/[code]`. Beamer `/screen/[code]` (öffentlich, nur lesend, mit Admin Cookie zusätzlich Steuerleiste, Tasten Leertaste und Pfeil rechts, H blendet aus). Admin `/admin/games` (Start), `/admin/games/[code]` (Steuerung), `/admin/results` und `/admin/results/[sessionId]`. Konfetti mit `canvas-confetti` beim Enthüllen von Platz 1, nur ohne Bewegungsreduktion.
+13. **Verbindung der Geräte:** Nach jeder Auflösung baut jedes Gerät die Verbindung nach zufälliger Wartezeit (Smartphones bis 3 Sekunden, Beamer und Admin bis 1.5 Sekunden) neu auf. Smartphones prüfen beim Sichtbarwerden der Seite mit einem Ping, ob die Verbindung noch lebt, und halten den Bildschirm wach.
+14. **Tests:** Auswertung und Punkte (reine Logik), Engine gegen echtes Redis mit steuerbarer Uhr, Gesamtablauf über WebSockets und zwei Instanzen, Client im Spielablauf, Neon Durchführungen gegen echtes Postgres, Upstash Adapter mit einem ganzen Quiz. Mutationsprüfungen: Schliessflagge, HSETNX, Versionsprüfung der Befehle, Zeitprüfung des Hinweises, Gnadenfrist, Verbergen der Gesamtpunkte.
+15. **Lasttest:** `scripts/loadtest.ts`, Bericht und Anleitung in `docs/LASTTEST.md`. Lokal mit 60 Geräten über zwei Instanzen und bis zu 50 Prozent Abbrüchen pro Frage: jede quittierte Antwort wurde gezählt, alle Prüfungen bestanden. Auf Vercel nicht gemessen.
 
 ## Redis Schlüssel und Kanäle
 
@@ -143,7 +163,9 @@ Abweichungen und Ergänzungen gegenüber dem Vorschlag der Spezifikation:
 * `src/lib/design.ts`: Antwortfarben und Symbole. `src/components`: gemeinsame Bausteine.
 * `src/proxy.ts`: erste Schranke für `/admin`. `src/lib/auth`: Token, Passwort, Session. `src/lib/rate-limit.ts`: Rate Limit.
 * `src/lib/quiz`: Schema, Regeln, Zahlenformat und Repository der Quizverwaltung. `src/lib/health.ts`: Systemprüfung. `src/lib/db/migrations.ts`: Migrationen aus dem Portal.
-* `drizzle/`: Migrationen. `docs/`: Anleitungen. `scripts/`: Messskripte.
+* `src/lib/game`: Spielablauf (siehe Abschnitt Spielablauf Schicht). `src/components/game`: Ansichten für Smartphone, Beamer und Steuerung. `src/app/api/join`: Beitritt.
+* `src/app/(player)/join`, `src/app/(player)/play`: Smartphone. `src/app/(screen)/screen/[code]`: Beamer. `src/app/(admin)/admin/(portal)/games`, `.../results`: Durchführung und Resultate.
+* `drizzle/`: Migrationen. `docs/`: Anleitungen (`SETUP.md`, `VERBINDUNGSTEST.md`, `LASTTEST.md`, `ANNAHMEN.md`). `scripts/`: Entwicklungsserver, Demo Quiz, Lasttest.
 
 ## Befehle
 
@@ -156,7 +178,9 @@ TEST_DATABASE_URL=postgres://BENUTZER:PASSWORT@localhost:5432/quiztest TEST_REDI
 npm run build        # Produktionsbuild
 npm run db:generate  # neue Migration aus Schemaänderung
 npm run db:migrate   # Migration anwenden (DATABASE_URL_UNPOOLED)
-npm run dev:ws       # lokaler WebSocket Server für die Entwicklung (Port 3001)
+npm run dev:ws       # lokaler WebSocket Server für die Entwicklung (Port 3001, weitere Instanz mit DEV_WS_PORT=3002)
+npm run seed:demo    # legt ein Demo Quiz mit sechs Fragen an (Status Bereit)
+npm run loadtest     # Lasttest mit simulierten Geräten, siehe docs/LASTTEST.md
 ```
 
 ## Meilensteine
@@ -164,11 +188,13 @@ npm run dev:ws       # lokaler WebSocket Server für die Entwicklung (Port 3001)
 1. Projektgerüst, Region, Verbindungen, Schema, Dokumentation: **umgesetzt und abgenommen**.
 2. Adminlogin und CMS: **umgesetzt und abgenommen**, auf Vercel in Betrieb.
 3. WebSocket Endpunkt, Publish/Subscribe, Spielertoken, Statusabgleich, Verbindungsstrategie: **umgesetzt, wartet auf Bestätigung**. Lokal mit echtem Redis und echten WebSockets getestet. Auf Vercel noch nicht gemessen, dafür gibt es das Verbindungslabor.
-4. Warteraum mit Bubbles, QR Code, Beitritt, Beamer Ansicht.
-5. Spielablauf mit oberem Drittel der Auflösung.
-6. Punkteberechnung, Rangliste, Podest, Siegerbildschirm.
-7. Spielende, Resultate nach Neon, Resultatansicht.
-8. Lasttest mit 60 simulierten Clients und Bericht.
+4. Warteraum mit Bubbles, QR Code, Beitritt, Beamer Ansicht: **umgesetzt, wartet auf Bestätigung**.
+5. Spielablauf mit oberem Drittel der Auflösung: **umgesetzt, wartet auf Bestätigung**.
+6. Punkteberechnung, Rangliste, Podest, Siegerbildschirm: **umgesetzt, wartet auf Bestätigung**.
+7. Spielende, Resultate nach Neon, Resultatansicht: **umgesetzt, wartet auf Bestätigung**.
+8. Lasttest mit 60 simulierten Clients und Bericht: **umgesetzt, lokal gemessen** (`docs/LASTTEST.md`), auf Vercel noch zu messen.
+
+Die Meilensteine 4 bis 8 entstanden in einem Zug ohne Rückfragen. Offene Punkte und Annahmen stehen in `docs/ANNAHMEN.md` und sollen vor einer Abnahme besprochen werden.
 
 ## Nicht bestätigt oder offen
 
@@ -179,10 +205,12 @@ Diese Punkte sind in den offiziellen Quellen nicht festgehalten oder noch nicht 
 3. Wie Upstash Publish und Subscribe Nachrichten zählt.
 4. Ob eine ruhende WebSocket Verbindung Active CPU oder Provisioned Memory verbraucht, und welchen Close Code die Plattform beim Erreichen von 300 Sekunden sendet. Beides misst das Verbindungslabor (`docs/VERBINDUNGSTEST.md`).
 5. Ob `upgradeWebSocket` lokal mit `vercel dev` läuft. Mit `next dev` oder `next start` gibt es keinen WebSocket Upgrade.
-6. Ob die 0.5 Sekunden Regel auch für Schätzfragen gilt. Die Spezifikation nennt sie nur bei Multiple Choice. Offen für Meilenstein 6, Vorschlag: gleicher Zeitfaktor wie bei Multiple Choice.
+6. Ob die 0.5 Sekunden Regel auch für Schätzfragen gilt. Die Spezifikation nennt sie nur bei Multiple Choice. Umgesetzt wie bei Multiple Choice (Annahme 4), zu bestätigen.
 7. Die Nutzungsbedingungen des Hobby Plans für einen Club.
 8. Ob Upstash den Befehl PUBLISH innerhalb von Lua erlaubt. Der Spielspeicher wechselt bei einem Fehler automatisch auf getrenntes Veröffentlichen. Das Labor zeigt, welcher Weg aktiv ist.
 9. Wie viele Funktionsinstanzen bei 60 Verbindungen entstehen und wie schnell Änderungen auf Vercel ankommen.
+10. Wie Upstash die Befehle innerhalb von Lua Skripten zählt. Lokal gemessen sind es etwa 650 Befehle pro Frage mit 60 Personen (inklusive der Befehle innerhalb der Skripte), siehe `docs/LASTTEST.md`.
+11. Die Entscheide der Meilensteine 4 bis 8 aus `docs/ANNAHMEN.md`, vor allem: Start nur mit Teilnehmenden, Gnadenfrist von 300 Millisekunden, Zeithinweis auch durch Smartphones, kein Wiedereintritt nach dem Start bei verlorenem Token.
 
 ## Quellen der Recherche (Stand 26. November 2026)
 

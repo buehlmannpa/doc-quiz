@@ -106,6 +106,13 @@ export type EngineOptions = {
   log?: (event: string, data: Record<string, unknown>) => void;
   /** Wartezeiten zwischen den Versuchen, die Resultate zu speichern. Für Tests kurz. */
   persistRetryDelaysMs?: number[];
+  /**
+   * Die Resultate im Hintergrund speichern, ohne die Auflösung darauf warten zu lassen. In Betrieb sinnvoll: Ein kalter
+   * Start von Neon (Scale to Zero) dauert einige Sekunden und soll die Quittung der letzten Antwort nicht aufhalten.
+   * Der Zustand ist zu diesem Zeitpunkt längst veröffentlicht. Die Tests warten auf das Speichern (Standard false).
+   * Auf Vercel lebt die Funktion weiter, solange die WebSocket Verbindungen offen sind.
+   */
+  persistInBackground?: boolean;
 };
 
 // KEYS[1] Antworten. ARGV: Spieler Kennung, Antwort, Ablauf. Rückgabe: Zahl der Antworten, -1 geschlossen, -2 doppelt.
@@ -151,6 +158,7 @@ export class GameEngine implements GameController {
   private readonly hooks: EngineHooks;
   private readonly log: (event: string, data: Record<string, unknown>) => void;
   private readonly retryDelays: number[];
+  private readonly persistInBackground: boolean;
   /** Der Snapshot ändert sich während eines Spiels nie, deshalb darf er pro Instanz gemerkt werden. */
   private readonly quizCache = new Map<string, { createdAt: number; quiz: GameQuiz }>();
 
@@ -162,6 +170,7 @@ export class GameEngine implements GameController {
     this.hooks = options.hooks ?? {};
     this.log = options.log ?? (() => {});
     this.retryDelays = options.persistRetryDelaysMs ?? [300, 1_000];
+    this.persistInBackground = options.persistInBackground ?? false;
   }
 
   // ---------------------------------------------------------------------------------------------------------
@@ -551,7 +560,11 @@ export class GameEngine implements GameController {
     }
 
     this.log("question_resolved", { code, q: question.index, reason: options.reason, answered: evaluation.resolution.answered });
-    if (evaluation.isLast) await this.persist(code);
+    if (evaluation.isLast) {
+      // persist fängt alle Fehler selbst ab und meldet sie im Protokoll.
+      if (this.persistInBackground) void this.persist(code);
+      else await this.persist(code);
+    }
     return { ok: true, value: undefined };
   }
 
