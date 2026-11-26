@@ -9,6 +9,7 @@ import {
   resolveKeyPrefix,
   resolveRedisRestEnv,
   resolveRedisTcpEnv,
+  resolveSessionSecret,
 } from "./env";
 
 const PG = "postgresql://user:pw@host.example.neon.tech/db?sslmode=require";
@@ -119,6 +120,14 @@ describe("resolveAdminEnv", () => {
 
   it("hat keinen Ersatzwert für das Geheimnis", () => {
     expect(() => resolveAdminEnv({ ADMIN_PASSWORD: "geheim123" })).toThrow(EnvError);
+  });
+});
+
+describe("resolveSessionSecret", () => {
+  it("verlangt nur das Geheimnis, nicht das Admin Passwort", () => {
+    expect(resolveSessionSecret({ SESSION_SECRET: "x".repeat(32) })).toBe("x".repeat(32));
+    expect(() => resolveSessionSecret({ SESSION_SECRET: "kurz" })).toThrow(EnvError);
+    expect(() => resolveSessionSecret({})).toThrow(/SESSION_SECRET/);
   });
 });
 

@@ -148,6 +148,19 @@ export function resolveAdminEnv(source: EnvSource): AdminEnv {
   };
 }
 
+/**
+ * Nur das Geheimnis, ohne das Admin Passwort. Es signiert das Admin Cookie und dient als Schlüssel für den Hash
+ * der Spielertoken. Der Spielbetrieb soll nicht vom Admin Passwort abhängen. Wird das Geheimnis geändert,
+ * werden alle Anmeldungen und alle Spielertoken ungültig.
+ */
+export function resolveSessionSecret(source: EnvSource): string {
+  const parsed = adminSchema.shape.SESSION_SECRET.safeParse(source.SESSION_SECRET);
+  if (!parsed.success) {
+    throw new EnvError("SESSION_SECRET fehlt oder ist zu kurz (mindestens 32 Zeichen).");
+  }
+  return parsed.data;
+}
+
 // ---------------------------------------------------------------------------
 // Umgebung, Schlüsselpräfix, Schalter
 // ---------------------------------------------------------------------------
