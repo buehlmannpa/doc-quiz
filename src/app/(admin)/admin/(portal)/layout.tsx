@@ -2,7 +2,9 @@ import AdminSidebar from "@/components/AdminSidebar";
 
 /**
  * Layout des Adminportals (PC). Breiter Inhaltsbereich mit Seitenleiste.
- * Login und Schutz der Seiten folgen in Meilenstein 2.
+ *
+ * Der Zugriffsschutz steckt nicht hier, sondern in jeder Seite und Server Action (requireAdmin).
+ * Ein Layout wird bei der Navigation nicht neu geprüft und schützt deshalb nicht zuverlässig.
  */
 export default function AdminLayout({ children }: { children: React.ReactNode }) {
   return (

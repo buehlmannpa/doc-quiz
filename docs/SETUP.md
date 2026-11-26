@@ -75,7 +75,21 @@ Unter Settings, Environment Variables im Vercel Projekt:
 
 ## Schritt 6: Tabellen anlegen (Migration)
 
-Die Tabellen entstehen mit Drizzle Kit. Die Migration läuft über die direkte Adresse `DATABASE_URL_UNPOOLED` und einmal pro Änderung, nicht bei jedem Deployment und nicht aus der App.
+Die Tabellen entstehen mit Drizzle Kit. Die Migration läuft über die direkte Adresse `DATABASE_URL_UNPOOLED` und einmal pro Änderung, nicht bei jedem Deployment. Es gibt zwei Wege.
+
+### Variante A: im Adminportal (ohne eigenen Rechner)
+
+Seit Meilenstein 2 kann der angemeldete Admin die Migrationen im Browser anwenden. Das ist der Weg, wenn auf dem Rechner kein Node oder keine Datenbankverbindung erlaubt ist.
+
+1. `ADMIN_PASSWORD` und `SESSION_SECRET` müssen in Vercel gesetzt sein (Schritt 5), und zwar auch für die Umgebung Preview, wenn Sie ein Preview Deployment verwenden.
+2. `DATABASE_URL` und `DATABASE_URL_UNPOOLED` müssen für dieselbe Umgebung gesetzt sein (Schritt 3).
+3. Das Deployment abwarten. Öffnen Sie dessen Adresse mit dem Zusatz `/admin` und melden Sie sich mit `ADMIN_PASSWORD` an.
+4. Öffnen Sie im Menü die Seite System. Dort stehen die Verbindungen und der Stand der Migrationen, zum Beispiel "Angewendet: 0 von 1".
+5. Klicken Sie auf "Migrationen anwenden". Erwartet wird "1 Migration(en) angewendet" und danach "Angewendet: 1 von 1". Die Zeile "Neon Postgres" zeigt dann "in Ordnung".
+
+Der Knopf führt ausschliesslich die Migrationsdateien aus dem Repository aus. Eigenes SQL ist nicht möglich. Ein mehrfacher Klick ist harmlos, weil Drizzle sich angewendete Migrationen merkt und eine Datenbanksperre gleichzeitige Läufe verhindert.
+
+### Variante B: auf Ihrem Rechner
 
 Auf Ihrem Rechner mit Node 22:
 
@@ -98,6 +112,8 @@ Erwartet wird die Meldung "migrations applied successfully". Danach gibt es sech
 Wird später das Schema geändert, erzeugt `npm run db:generate` eine neue Migrationsdatei im Ordner `drizzle/`. Diese wird mit dem Code committet und mit `npm run db:migrate` angewendet.
 
 ## Schritt 7: Deployen und Systemcheck
+
+Die Seite System im Adminportal zeigt dieselben Angaben wie `/api/health`, auch in der Produktion, ohne `HEALTH_TOKEN`, aber mit Anmeldung. Sie ist der bequemste Weg zur Kontrolle. Die folgenden Angaben zu `/api/health` gelten sinngemäss.
 
 1. Den Branch pushen oder im Vercel Dashboard ein Redeploy auslösen.
 2. Die Adresse des Preview Deployments öffnen (Sie sehen sie im Vercel Dashboard beim Deployment) und `/api/health` anhängen. Preview Deployments sind in der Regel durch Vercel Authentication geschützt. Im Browser genügt es, bei Vercel angemeldet zu sein.

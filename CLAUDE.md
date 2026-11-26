@@ -29,7 +29,7 @@ Rahmen: rund 60 gleichzeitige Teilnehmende, ein einziger Admin, Oberfläche auf 
 8. **Geheimhaltung.** Richtige Antworten gelangen erst bei der Auflösung an die Clients.
 9. **Mehrere Umgebungen teilen sich eine Redis Datenbank** (Upstash Free erlaubt nur eine). Alle Schlüssel und Kanäle tragen ein Präfix: `prod`, `preview`, `dev` oder `local`. Es wird in `src/lib/env.ts` bestimmt und in `src/lib/redis/keys.ts` angewendet.
 10. **Neon Treiber:** `pg` mit Pool und `attachDatabasePool`, wie von Neon für Vercel Fluid Compute empfohlen. Interaktive Transaktionen sind nötig (Fragen sortieren, Optionen ersetzen). Der HTTP Treiber kann das nicht.
-11. **Migrationen** laufen mit der direkten Adresse `DATABASE_URL_UNPOOLED`, einmal pro Änderung, nie aus der App und nie im Build.
+11. **Migrationen** laufen mit der direkten Adresse `DATABASE_URL_UNPOOLED`, einmal pro Änderung und nie im Build. Normalerweise mit `npm run db:migrate`. Wo das nicht möglich ist (Geschäftspolicy), wendet der angemeldete Admin sie auf der Seite `/admin/system` an (`src/lib/db/migrations.ts`). Dieser Weg führt nur die Dateien aus `drizzle/` aus, nutzt einen Advisory Lock gegen doppelte Läufe und braucht keine Zugangsdaten ausserhalb von Vercel.
 
 ## Verbindungsstrategie
 
