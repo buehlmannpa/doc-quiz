@@ -31,4 +31,4 @@ npm run db:migrate
 
 ## Stand
 
-Meilenstein 1 von 8: Projektgerüst, Verbindungen, Datenbankschema und Dokumentation. Siehe `CLAUDE.md` für die Übersicht.
+Meilenstein 2 von 8: Adminlogin, Quizverwaltung, Systemseite mit Migrationen. Siehe `CLAUDE.md` für die Übersicht.

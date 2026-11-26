@@ -71,6 +71,18 @@ Abweichungen und Ergänzungen gegenüber dem Vorschlag der Spezifikation:
 5. Der Spielname ist pro Durchführung eindeutig, ohne Beachtung der Gross und Kleinschreibung.
 6. Nicht in der Datenbank erzwungen, sondern mit Zod in der Anwendung: 2 bis 4 Optionen, mindestens eine richtig bei Multiple Choice, keine richtige bei Umfragen, höchstens eine aktive Durchführung.
 
+## Adminportal und Quizverwaltung (Meilenstein 2)
+
+1. **Seiten:** `/admin/login`, `/admin` (Übersicht), `/admin/quizzes` (Liste und Neues Quiz), `/admin/quizzes/[quizId]` (Titel, Status, Fragen), `.../questions/new` und `.../questions/[questionId]`, `/admin/system` (Verbindungen, Region, Migrationen). Alle ausser dem Login sind geschützt.
+2. **Schichten:** Zod Schemas in `src/lib/quiz/schema.ts` (gleiche Regeln im Formular und auf dem Server), reine Regeln in `src/lib/quiz/rules.ts`, Datenbankzugriff in `src/lib/quiz/repository.ts`, Server Actions in `quizzes/actions.ts`. Actions prüfen Anmeldung, Kennungen und Eingaben und geben lesbare Meldungen zurück.
+3. **Transaktionen:** Jede Änderung sperrt zuerst die Zeile des Quiz (`FOR UPDATE`). Gleichzeitige Änderungen laufen nacheinander, die Positionen der Fragen bleiben lückenlos. Der Start einer Durchführung (Meilenstein 4) muss dieselbe Zeile sperren, damit zwischen der Prüfung "keine Durchführung" und der Änderung keine entstehen kann.
+4. **Status:** Entwurf, Bereit, Abgeschlossen. Bereit braucht mindestens eine Frage, und alle gespeicherten Fragen werden dabei erneut geprüft. Zurück in den Entwurf nur ohne Durchführung. Abgeschlossen ist endgültig (archiviert, nicht bearbeitbar, nicht spielbar) und lässt sich nur duplizieren. Spielbar ist nur der Status Bereit (`isPlayable`).
+5. **Sperre:** Ein Quiz mit Durchführung oder im Status Abgeschlossen ist nicht mehr bearbeitbar. Duplizieren bleibt möglich und erzeugt einen neuen Entwurf mit "(Kopie)" im Titel. Löschen ist nur ohne Durchführung möglich.
+6. **Fragen:** Typ Multiple Choice, Schätzfrage oder Umfrage. Höchstens 50 Fragen pro Quiz, Zeitlimit 5 bis 120 Sekunden, maximale Punkte 1 bis 10000 (Umfrage 0). Leere Antwortzeilen im Formular werden ignoriert. Beim Speichern einer Frage werden die Antworten vollständig ersetzt, beim Typwechsel werden Felder anderer Typen auf null gesetzt.
+7. **Zahlen:** Eingaben dürfen mit Punkt oder Komma geschrieben werden, auch mit Apostroph als Tausendertrenner (`src/lib/quiz/number.ts`). Anzeige in Schweizer Schreibweise (zum Beispiel 1'000 und 216.5).
+8. **Tests:** Reine Logik hat Unit Tests. Das Repository hat 16 Integrationstests gegen eine echte Postgres Datenbank, die nur mit `TEST_DATABASE_URL` laufen (Befehl unter Befehle). Nie die Datenbank von Produktion oder Preview verwenden.
+9. **Migrationen aus dem Portal:** siehe Architekturentscheid 11.
+
 ## Redis Schlüssel und Kanäle
 
 1. Alle Namen entstehen über `redisKey(...)` und `redisChannel(...)` in `src/lib/redis/keys.ts`. Niemals Schlüssel von Hand zusammensetzen.
@@ -85,7 +97,9 @@ Abweichungen und Ergänzungen gegenüber dem Vorschlag der Spezifikation:
 2. Eingaben werden serverseitig mit Zod geprüft.
 3. Rate Limiting: Beitritt pro IP über Redis, Antworten über die Regel "eine Antwort pro Frage" und eine Begrenzung pro Verbindung im Speicher der Instanz.
 4. Nur der Admin darf Steuerbefehle senden, serverseitig bei jeder Nachricht geprüft.
-5. Adminlogin: Passwort aus `ADMIN_PASSWORD` mit zeitkonstantem Vergleich, Session Cookie (HttpOnly, Secure, SameSite Strict) mit HMAC und Ablaufdatum. `SESSION_SECRET` ist Pflicht ohne Ersatzwert. Den Auth Code der Club App übernehmen wir bewusst nicht.
+5. Adminlogin (umgesetzt): Passwort aus `ADMIN_PASSWORD`, verglichen ohne Zeitunterschiede (`src/lib/auth/password.ts`). Session Cookie `doc_quiz_admin` mit HMAC SHA 256 und Ablauf nach 12 Stunden (`src/lib/auth/token.ts`), HttpOnly, Secure auf Vercel, SameSite Strict. `SESSION_SECRET` ist Pflicht und hat keinen Ersatzwert. Den Auth Code der Club App übernehmen wir bewusst nicht.
+5a. Rate Limit des Logins: höchstens 8 Versuche pro IP und 40 insgesamt in 15 Minuten, gezählt in Redis (IP nur als Hash), mit Ersatz im Speicher der Instanz, falls Redis nicht erreichbar ist. Nach einem Fehlversuch antwortet der Server verzögert.
+5b. Zugriffsschutz in drei Schichten: `src/proxy.ts` leitet ohne gültige Session um, `requireAdmin()` steht am Anfang jeder Seite und jeder Server Action, und das Repository prüft die Regeln erneut. Layouts allein schützen nicht, weil sie bei der Navigation nicht neu geprüft werden. `requireAdmin()` liest das Cookie zuerst, damit Seiten immer dynamisch bleiben (sonst würde Next beim Bauen eine Umleitung vorrendern).
 6. Der Systemcheck `/api/health` gibt in der Produktion ohne Token nur `ok` zurück und berührt weder Neon noch Redis.
 7. Test Endpunkte (`/api/spike/...`) und die Seite `/design` sind in der Produktion gesperrt.
 8. Zugangsdaten stehen nie in Fehlermeldungen oder Logs. Umgebungsvariablen nur über `src/lib/env.ts` lesen.
@@ -109,6 +123,8 @@ Abweichungen und Ergänzungen gegenüber dem Vorschlag der Spezifikation:
 * `src/app/design`: Gestaltungsvorschau (nicht in der Produktion).
 * `src/lib/env.ts`: Umgebungsvariablen. `src/lib/db`: Schema und Client. `src/lib/redis`: Schlüssel, REST Client, TCP Client.
 * `src/lib/design.ts`: Antwortfarben und Symbole. `src/components`: gemeinsame Bausteine.
+* `src/proxy.ts`: erste Schranke für `/admin`. `src/lib/auth`: Token, Passwort, Session. `src/lib/rate-limit.ts`: Rate Limit.
+* `src/lib/quiz`: Schema, Regeln, Zahlenformat und Repository der Quizverwaltung. `src/lib/health.ts`: Systemprüfung. `src/lib/db/migrations.ts`: Migrationen aus dem Portal.
 * `drizzle/`: Migrationen. `docs/`: Anleitungen. `scripts/`: Messskripte.
 
 ## Befehle
@@ -117,7 +133,8 @@ Abweichungen und Ergänzungen gegenüber dem Vorschlag der Spezifikation:
 npm run dev          # lokale Entwicklung
 npm run lint         # ESLint
 npm run typecheck    # TypeScript
-npm test             # Unit Tests
+npm test             # Unit Tests (Integrationstests werden übersprungen)
+TEST_DATABASE_URL=postgres://BENUTZER:PASSWORT@localhost:5432/quiztest npm test   # mit Integrationstests
 npm run build        # Produktionsbuild
 npm run db:generate  # neue Migration aus Schemaänderung
 npm run db:migrate   # Migration anwenden (DATABASE_URL_UNPOOLED)
@@ -126,8 +143,8 @@ npm run spike:ws     # Messungen, siehe docs/SPIKE.md
 
 ## Meilensteine
 
-1. Projektgerüst, Region, Verbindungen, Schema, Dokumentation, Spike: **umgesetzt, wartet auf Bestätigung und auf die Messungen auf Vercel**.
-2. Adminlogin und CMS.
+1. Projektgerüst, Region, Verbindungen, Schema, Dokumentation, Spike: **umgesetzt**. Die Messungen des Spikes auf Vercel stehen noch aus (`docs/SPIKE.md`) und sind Voraussetzung für Meilenstein 3.
+2. Adminlogin und CMS: **umgesetzt, wartet auf Bestätigung**. Noch nicht auf Vercel getestet.
 3. WebSocket Endpunkt, Publish/Subscribe, Spielertoken, Statusabgleich, Verbindungsstrategie.
 4. Warteraum mit Bubbles, QR Code, Beitritt, Beamer Ansicht.
 5. Spielablauf mit oberem Drittel der Auflösung.
