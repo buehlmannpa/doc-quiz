@@ -47,6 +47,18 @@ Optionen:
 6. `--seed` Zahl für einen wiederholbaren Ablauf.
 7. `--report` schreibt den Bericht zusätzlich in eine Datei.
 
+Auf Vercel arbeitet der Spielspeicher über das Upstash SDK (HTTP) und nicht über TCP. Dieser Weg lässt sich lokal mit dem Ersatzserver prüfen, die Hubs und die App laufen dann wie in Betrieb:
+
+```bash
+npm run dev:fake-upstash
+```
+
+```bash
+UPSTASH_REDIS_REST_URL=http://127.0.0.1:8079 UPSTASH_REDIS_REST_TOKEN=test npm run dev:ws
+```
+
+Genau so wurde ein Fehler gefunden, der über TCP nicht auffiel (die Punkte der Fragen wurden nicht summiert, weil HGETALL über das SDK ein flaches Array liefert). Seither laufen Browser Durchlauf und Lasttest auch über diesen Weg.
+
 Das Testspiel erhält einen Code im Bereich 900000 bis 999999. Echte Spiele sind davon nicht betroffen. Es wird am Ende wieder aus Redis entfernt.
 
 ## Gegen Vercel ausführen

@@ -18,7 +18,8 @@
     "db:migrate": "drizzle-kit migrate",
     "dev:ws": "tsx scripts/dev-ws-server.ts",
     "seed:demo": "tsx scripts/seed-demo.ts",
-    "loadtest": "tsx scripts/loadtest.ts"
+    "loadtest": "tsx scripts/loadtest.ts",
+    "dev:fake-upstash": "tsx scripts/fake-upstash.ts"
   },
   "dependencies": {
     "@upstash/redis": "^1.41.1",

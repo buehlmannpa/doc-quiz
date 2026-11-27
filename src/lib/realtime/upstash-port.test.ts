@@ -9,7 +9,7 @@ import type { GameQuiz } from "@/lib/game/snapshot";
 import IORedis from "ioredis";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { channelMessageSchema } from "./protocol";
-import { upstashPort } from "./redis-port";
+import { hashReplyToRecord, upstashPort } from "./redis-port";
 import { GameStore } from "./store";
 import { startFakeUpstash, type FakeUpstash } from "./testing/fake-upstash";
 
@@ -151,6 +151,20 @@ describe.skipIf(!url)("Upstash Adapter (SDK über HTTP)", () => {
           unit: "PS",
           tolerance: 100,
         },
+        {
+          id: "q3",
+          type: "multiple_choice",
+          prompt: "Land?",
+          timeLimitSeconds: 20,
+          maxPoints: 500,
+          options: [
+            { id: "c", text: "Italien", isCorrect: true },
+            { id: "d", text: "Spanien", isCorrect: false },
+          ],
+          correctValue: null,
+          unit: null,
+          tolerance: null,
+        },
       ],
     };
     const code = nextCode();
@@ -177,18 +191,63 @@ describe.skipIf(!url)("Upstash Adapter (SDK über HTTP)", () => {
     expect(state?.results[ids[0] as string]).toMatchObject({ correct: true, rank: 1 });
     expect(state?.results[ids[1] as string]).toMatchObject({ correct: false, rank: 2 });
 
+    const [anna, beat] = ids as [string, string];
+    const pointsQ1 = { anna: state?.results[anna]?.points ?? -1, beat: state?.results[beat]?.points ?? -1 };
+
     expect((await engine.next(code)).ok).toBe(true);
     clock += 500;
-    await engine.answer(code, ids[0] as string, { q: 1, value: 190 }, null);
-    await engine.answer(code, ids[1] as string, { q: 1, value: 200 }, null);
+    await engine.answer(code, anna, { q: 1, value: 190 }, null);
+    await engine.answer(code, beat, { q: 1, value: 200 }, null);
+    state = await store.getState(code);
+    expect(state?.phase).toBe("resolved");
+    // Die Punkte der Fragen werden summiert: Der Stand der Vorfrage wird über HGETALL des SDK gelesen. Das echte
+    // Upstash liefert dort ein flaches Array, der Ersatzserver bildet das nach. Ohne Umwandlung im Adapter wären die
+    // Gesamtpunkte hier nur die Punkte der zweiten Frage.
+    const pointsQ2 = { anna: state?.results[anna]?.points ?? -1, beat: state?.results[beat]?.points ?? -1 };
+    expect(pointsQ1.anna).toBeGreaterThan(0);
+    expect(pointsQ2.anna).toBeGreaterThan(0);
+    expect(state?.results[anna]?.total).toBe(pointsQ1.anna + pointsQ2.anna);
+    expect(state?.results[beat]?.total).toBe(pointsQ1.beat + pointsQ2.beat);
+
+    expect((await engine.next(code)).ok).toBe(true);
+    clock += 500;
+    await engine.answer(code, anna, { q: 2, option: 0 }, null);
+    await engine.answer(code, beat, { q: 2, option: 1 }, null);
     state = await store.getState(code);
     expect(state?.phase).toBe("podium");
+    const pointsQ3 = { anna: state?.results[anna]?.points ?? -1, beat: state?.results[beat]?.points ?? -1 };
     expect(saved).toEqual([2]);
+    // Die gespeicherte Endrangliste ist die Summe aller drei Fragen, und die Token Hashes kommen mit der richtigen Zuordnung.
+    const outcome = await engine.collectOutcome(code);
+    expect(outcome?.finalRows.find((row) => row.playerId === anna)?.points).toBe(pointsQ1.anna + pointsQ2.anna + pointsQ3.anna);
+    expect(outcome?.finalRows.find((row) => row.playerId === beat)?.points).toBe(pointsQ1.beat + pointsQ2.beat + pointsQ3.beat);
+    expect(Object.keys(outcome?.tokenHashes ?? {}).sort()).toEqual([anna, beat].sort());
+    expect(Object.values(outcome?.tokenHashes ?? {}).every((hash) => /^[0-9a-f]{64}$/.test(hash))).toBe(true);
+    expect(await engine.progress(code, 0)).toBe(2);
+
     expect((await engine.reveal(code)).ok).toBe(true);
     expect((await engine.reveal(code)).ok).toBe(true);
     state = await store.getState(code);
     expect(state?.podium?.ranking?.map((row) => row.name)).toEqual(["Anna", "Beat"]);
+    expect(state?.podium?.ranking?.map((row) => row.points)).toEqual([pointsQ1.anna + pointsQ2.anna + pointsQ3.anna, pointsQ1.beat + pointsQ2.beat + pointsQ3.beat]);
     expect((await engine.finish(code)).ok).toBe(true);
   });
 
+});
+
+describe("hashReplyToRecord", () => {
+  it("wandelt ein flaches Array (so liefert es Upstash) in ein Objekt um", () => {
+    expect(hashReplyToRecord(["a", "1", "b", '{"x":2}'])).toEqual({ a: "1", b: '{"x":2}' });
+  });
+
+  it("übernimmt ein Objekt (so liefert es ioredis) und macht Werte zu Text", () => {
+    expect(hashReplyToRecord({ a: "1", b: 2, c: { x: 1 } })).toEqual({ a: "1", b: "2", c: '{"x":1}' });
+  });
+
+  it("liefert für leere und fehlende Antworten ein leeres Objekt und ignoriert ein überzähliges Feld", () => {
+    expect(hashReplyToRecord([])).toEqual({});
+    expect(hashReplyToRecord(null)).toEqual({});
+    expect(hashReplyToRecord(undefined)).toEqual({});
+    expect(hashReplyToRecord(["a", "1", "b"])).toEqual({ a: "1" });
+  });
 });

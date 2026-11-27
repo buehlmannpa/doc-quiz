@@ -22,7 +22,7 @@ const g = globalThis as unknown as Instances;
  * Auf Vercel läuft der Spielspeicher über die REST Schnittstelle von Upstash. Fehlt sie (lokale Entwicklung mit
  * einem eigenen Redis Server), arbeitet er über TCP mit REDIS_URL. Beide Wege führen dieselbe Logik aus.
  */
-function createRedisPort(): RedisPort {
+export function createRedisPort(): RedisPort {
   try {
     resolveRedisRestEnv(process.env);
     return upstashPort(getRedis());

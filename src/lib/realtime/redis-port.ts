@@ -28,6 +28,24 @@ export interface RedisPort {
   hsetMany(key: string, entries: Record<string, string>, ttlSeconds: number): Promise<void>;
 }
 
+/**
+ * Wandelt die Antwort von HGETALL in ein Objekt Feld zu Wert um.
+ *
+ * Redis und das echte Upstash liefern ein flaches Array (Feld, Wert, Feld, Wert ...). Das Upstash SDK wandelt es nur
+ * mit automatischer Deserialisierung in ein Objekt um. Wir arbeiten mit automaticDeserialization: false (siehe rest.ts),
+ * dann reicht das SDK das Array unverändert durch. ioredis liefert dagegen ein Objekt. Diese Funktion kennt beide
+ * Formen. Ein leerer Hash oder ein fehlender Schlüssel ergibt ein leeres Objekt.
+ */
+export function hashReplyToRecord(reply: unknown): Record<string, string> {
+  const result: Record<string, string> = {};
+  if (Array.isArray(reply)) {
+    for (let index = 0; index + 1 < reply.length; index += 2) result[String(reply[index])] = String(reply[index + 1]);
+  } else if (reply !== null && typeof reply === "object") {
+    for (const [field, value] of Object.entries(reply)) result[field] = typeof value === "string" ? value : JSON.stringify(value);
+  }
+  return result;
+}
+
 /** Adapter für das Upstash SDK. Der Client muss mit automaticDeserialization: false laufen (siehe rest.ts). */
 export function upstashPort(redis: Redis): RedisPort {
   return {
@@ -66,8 +84,7 @@ export function upstashPort(redis: Redis): RedisPort {
       return (await redis.set(key, value, { ex: ttlSeconds, nx: true })) === "OK";
     },
     async hgetall(key) {
-      const all = await redis.hgetall<Record<string, string>>(key);
-      return all ?? {};
+      return hashReplyToRecord(await redis.hgetall(key));
     },
     async hsetMany(key, entries, ttlSeconds) {
       if (Object.keys(entries).length === 0) return;
@@ -110,7 +127,9 @@ export function ioredisPort(client: IORedis): RedisPort {
     async setIfAbsent(key, value, ttlSeconds) {
       return (await client.set(key, value, "EX", ttlSeconds, "NX")) === "OK";
     },
-    hgetall: (key) => client.hgetall(key),
+    async hgetall(key) {
+      return hashReplyToRecord(await client.hgetall(key));
+    },
     async hsetMany(key, entries, ttlSeconds) {
       if (Object.keys(entries).length === 0) return;
       await client.hset(key, entries);

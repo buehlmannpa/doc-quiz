@@ -117,14 +117,14 @@ Umgesetzt und lokal im Browser geprüft (Playwright mit Beamer, Admin und vier S
 11. **Beitritt:** `POST /api/join` mit Origin Prüfung, Begrenzung pro IP (120 in 10 Minuten) und Zod. Das Token erhält nur der Browser des Spielers (localStorage). `GET /api/join?code=` sagt, ob das Spiel offen ist.
 12. **Oberflächen:** Smartphone `/join`, `/join/[code]`, `/play/[code]`. Beamer `/screen/[code]` (öffentlich, nur lesend, mit Admin Cookie zusätzlich Steuerleiste, Tasten Leertaste und Pfeil rechts, H blendet aus). Admin `/admin/games` (Start), `/admin/games/[code]` (Steuerung), `/admin/results` und `/admin/results/[sessionId]`. Konfetti mit `canvas-confetti` beim Enthüllen von Platz 1, nur ohne Bewegungsreduktion.
 13. **Verbindung der Geräte:** Nach jeder Auflösung baut jedes Gerät die Verbindung nach zufälliger Wartezeit (Smartphones bis 3 Sekunden, Beamer und Admin bis 1.5 Sekunden) neu auf. Smartphones prüfen beim Sichtbarwerden der Seite mit einem Ping, ob die Verbindung noch lebt, und halten den Bildschirm wach.
-14. **Tests:** Auswertung und Punkte (reine Logik), Engine gegen echtes Redis mit steuerbarer Uhr, Gesamtablauf über WebSockets und zwei Instanzen, Client im Spielablauf, Neon Durchführungen gegen echtes Postgres, Upstash Adapter mit einem ganzen Quiz. Mutationsprüfungen: Schliessflagge, HSETNX, Versionsprüfung der Befehle, Zeitprüfung des Hinweises, Gnadenfrist, Verbergen der Gesamtpunkte.
+14. **Tests:** Auswertung und Punkte (reine Logik), Engine gegen echtes Redis mit steuerbarer Uhr, Gesamtablauf über WebSockets und zwei Instanzen, Client im Spielablauf, Neon Durchführungen gegen echtes Postgres, Upstash Adapter mit einem ganzen Quiz über das SDK (inklusive Summe der Punkte über mehrere Fragen). Der Ersatzserver (`testing/fake-upstash.ts`) bildet die Antwortform des echten Upstash nach (HGETALL als flaches Array). Browser Durchläufe und Lasttest sollten auch über diesen REST Weg laufen (`npm run dev:fake-upstash`), weil Produktion so arbeitet. Mutationsprüfungen: Schliessflagge, HSETNX, Versionsprüfung der Befehle, Zeitprüfung des Hinweises, Gnadenfrist, Verbergen der Gesamtpunkte.
 15. **Lasttest:** `scripts/loadtest.ts`, Bericht und Anleitung in `docs/LASTTEST.md`. Lokal mit 60 Geräten über zwei Instanzen und bis zu 50 Prozent Abbrüchen pro Frage: jede quittierte Antwort wurde gezählt, alle Prüfungen bestanden. Auf Vercel nicht gemessen.
 
 ## Redis Schlüssel und Kanäle
 
 1. Alle Namen entstehen über `redisKey(...)` und `redisChannel(...)` in `src/lib/redis/keys.ts`. Niemals Schlüssel von Hand zusammensetzen.
 2. Teile sind auf `A bis Z`, `a bis z`, `0 bis 9`, Punkt, Unterstrich und Bindestrich beschränkt. Keine Platzhalter, Leerzeichen, Doppelpunkte oder Kommas. Kommas sind verboten, weil das SDK Nachrichten kommagetrennt liest.
-3. Werte werden als JSON Text gespeichert und mit Zod gelesen. Der REST Client läuft mit `automaticDeserialization: false`, damit zum Beispiel "123" nicht zur Zahl 123 wird.
+3. Werte werden als JSON Text gespeichert und mit Zod gelesen. Der REST Client läuft mit `automaticDeserialization: false`, damit zum Beispiel "123" nicht zur Zahl 123 wird. Folge: `HGETALL` liefert über das SDK ein flaches Array (Feld, Wert, Feld, Wert), über ioredis ein Objekt. Deshalb liest der Code Hashes nur über `port.hgetall` (Adapter mit `hashReplyToRecord`). Ein früherer Fehler, bei dem sich die Punkte der Fragen nicht summierten, entstand genau hier, weil der Ersatzserver in den Tests ein Objekt lieferte.
 4. Alle Schlüssel haben ein Ablaufdatum.
 5. Redis Befehle sparen: Upstash Free erlaubt 500'000 pro Monat. Der Zustand eines Spiels liegt so, dass ein einzelner Lesebefehl den vollen Zustand liefert. Rangliste und Punkte werden beim Auflösen im Code berechnet und als ein Wert gespeichert. Eine grobe, ungemessene Schätzung liegt bei 8'000 bis 10'000 Befehlen pro Spiel mit 60 Personen und 20 Fragen. Wie Publish und Subscribe Nachrichten gezählt werden, ist nicht dokumentiert und wird gemessen.
 
@@ -179,6 +179,7 @@ npm run build        # Produktionsbuild
 npm run db:generate  # neue Migration aus Schemaänderung
 npm run db:migrate   # Migration anwenden (DATABASE_URL_UNPOOLED)
 npm run dev:ws       # lokaler WebSocket Server für die Entwicklung (Port 3001, weitere Instanz mit DEV_WS_PORT=3002)
+npm run dev:fake-upstash   # Ersatzserver für Upstash REST (Port 8079), Hub und App darüber betreiben: UPSTASH_REDIS_REST_URL=http://127.0.0.1:8079 UPSTASH_REDIS_REST_TOKEN=test
 npm run seed:demo    # legt ein Demo Quiz mit sechs Fragen an (Status Bereit)
 npm run loadtest     # Lasttest mit simulierten Geräten, siehe docs/LASTTEST.md
 ```

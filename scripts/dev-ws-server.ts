@@ -18,8 +18,7 @@ import { verifySessionToken } from "@/lib/auth/token";
 import { getKeyPrefix, resolveRealtimeLimits, resolveRedisTcpEnv, resolveSessionSecret } from "@/lib/env";
 import { GameEngine } from "@/lib/game/engine";
 import { RealtimeHub } from "@/lib/realtime/hub";
-import { createSessionHooks } from "@/lib/realtime/instance";
-import { ioredisPort } from "@/lib/realtime/redis-port";
+import { createRedisPort, createSessionHooks } from "@/lib/realtime/instance";
 import { GameStore } from "@/lib/realtime/store";
 import { ioredisSubscriber } from "@/lib/realtime/subscriber";
 
@@ -29,7 +28,9 @@ const port = Number(process.env.DEV_WS_PORT ?? 3001);
 const redisUrl = resolveRedisTcpEnv(process.env).url;
 const secret = resolveSessionSecret(process.env);
 
-const store = new GameStore(ioredisPort(new IORedis(redisUrl)), { prefix: getKeyPrefix(), tokenSecret: secret });
+// Gleicher Weg wie auf Vercel: Sind UPSTASH_REDIS_REST_URL und UPSTASH_REDIS_REST_TOKEN gesetzt (zum Beispiel mit
+// dem Ersatzserver npm run dev:fake-upstash), läuft der Spielspeicher über das Upstash SDK, sonst über REDIS_URL.
+const store = new GameStore(createRedisPort(), { prefix: getKeyPrefix(), tokenSecret: secret });
 // Neon wird nur bei Gebrauch angesprochen. Ohne DATABASE_URL läuft das Spiel trotzdem, nur ohne Speichern der Resultate.
 const engine = new GameEngine(store, {
   hooks: createSessionHooks(),

@@ -16,12 +16,18 @@ export type FakeUpstash = { url: string; close: () => Promise<void> };
 
 type CallArg = string | number;
 
-export async function startFakeUpstash(redisUrl: string): Promise<FakeUpstash> {
+export async function startFakeUpstash(redisUrl: string, listenPort = 0): Promise<FakeUpstash> {
   const redis = new IORedis(redisUrl);
 
   const run = (command: unknown): Promise<unknown> => {
     if (!Array.isArray(command) || command.length === 0) throw new Error("ERR Ungültiger Befehl");
     const [name, ...args] = command.map((part) => (typeof part === "number" ? part : String(part))) as CallArg[];
+    // ioredis wandelt die Antwort von HGETALL selbst in ein Objekt um, auch bei call(). Das echte Upstash liefert, wie
+    // Redis, ein flaches Array (Feld, Wert, Feld, Wert ...). Ein Skript umgeht die Umwandlung und bildet die echte
+    // Antwort nach. Ein früherer Fehler blieb genau deshalb unentdeckt: Der Adapter bekam im Test ein Objekt, in Betrieb ein Array.
+    if (String(name).toLowerCase() === "hgetall") {
+      return redis.eval("return redis.call('HGETALL', KEYS[1])", 1, String(args[0]));
+    }
     return redis.call(String(name), ...args.map(String));
   };
 
@@ -52,7 +58,7 @@ export async function startFakeUpstash(redisUrl: string): Promise<FakeUpstash> {
     }
   });
 
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  await new Promise<void>((resolve) => server.listen(listenPort, "127.0.0.1", resolve));
   const { port } = server.address() as AddressInfo;
 
   return {

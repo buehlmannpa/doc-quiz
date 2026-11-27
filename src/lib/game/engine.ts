@@ -31,6 +31,7 @@ import {
 } from "@/lib/realtime/game-state";
 import type { ControllerResult, GameController } from "@/lib/realtime/controller";
 import type { Command } from "@/lib/realtime/protocol";
+import { hashReplyToRecord } from "@/lib/realtime/redis-port";
 import type { GameStore } from "@/lib/realtime/store";
 import { z } from "zod";
 import { clampAnswerTime } from "./scoring";
@@ -139,17 +140,6 @@ const storedAnswerSchema = z.object({
 });
 
 const finalRowsSchema = z.array(finalRowSchema);
-
-/** Wandelt die flache Antwort von HGETALL (Feld, Wert, Feld, Wert, ...) in eine Zuordnung um. */
-function pairsToRecord(raw: unknown): Record<string, string> {
-  const result: Record<string, string> = {};
-  if (Array.isArray(raw)) {
-    for (let index = 0; index + 1 < raw.length; index += 2) result[String(raw[index])] = String(raw[index + 1]);
-  } else if (raw && typeof raw === "object") {
-    for (const [key, value] of Object.entries(raw)) result[key] = String(value);
-  }
-  return result;
-}
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -499,7 +489,7 @@ export class GameEngine implements GameController {
     if (!snapshot) return { ok: false, reason: "invalid" };
 
     // 1. Antworten schliessen und lesen, atomar. Danach nimmt der Server keine Antwort mehr an.
-    const rawAnswers = pairsToRecord(
+    const rawAnswers = hashReplyToRecord(
       await this.store.port.eval(CLOSE_AND_READ_SCRIPT, [this.answersKey(code, question.index)], [this.store.ttlSeconds]),
     );
     const answers = new Map<string, StoredAnswer>();
